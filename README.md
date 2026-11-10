@@ -38,7 +38,7 @@ Then open http://localhost:8765.
 
 ### Deploying
 
-`.github/workflows/pages.yml` publishes `web/` to GitHub Pages on every push to `main` that changes it.
+`.github/workflows/pages.yml` publishes `web/` to GitHub Pages on every push to `main`.
 After you change a file in `web/`, bump `CACHE` in `web/sw.js` (e.g. `workhours-v2`).
 Installed copies pick up the new version the next time they're opened (sometimes it takes two launches).
 
