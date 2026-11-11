@@ -6,12 +6,7 @@ Track your working hours on different jobs from your iPhone.
 
 `https://arttujussikil.github.io/workhours/` — open it in Safari on your iPhone, then *Share → Add to Home Screen*.
 
-This repo has two versions of the app:
-
-| Folder | What it is | How it gets on the phone |
-|---|---|---|
-| `web/` | **Web app (the one in use).** Plain HTML/CSS/JS with no dependencies. Works offline. | Hosted on GitHub Pages, then *Share → Add to Home Screen* in Safari |
-| `WorkHours/` + `WorkHours.xcodeproj` | Native SwiftUI/SwiftData app (iOS 17+) | Needs a Mac with Xcode 16+ |
+The app lives in `web/`: plain HTML/CSS/JS with no dependencies, hosted on GitHub Pages, and it works offline.
 
 ## Features
 
@@ -48,7 +43,4 @@ Then open http://localhost:8765.
 After you change a file in `web/`, bump `CACHE` in `web/sw.js` (e.g. `workhours-v2`).
 Installed copies pick up the new version the next time they're opened (sometimes it takes two launches).
 
-## Native iOS app
-
-Open `WorkHours.xcodeproj` in Xcode 16+, set your signing team and a unique bundle ID, and press ⌘R.
-A free Apple ID works, but the app must be reinstalled every 7 days.
+An earlier native SwiftUI version (needs a Mac with Xcode) was removed; it's still in the git history before commit "Remove native iOS app".
