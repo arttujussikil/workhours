@@ -2,10 +2,12 @@
 
 /* ================= storage ================= */
 
+// NOTE: keep this key and the data shape backwards compatible, it holds the user's hours.
 const STORE_KEY = 'workhours.v1';
 const TAB_KEY = 'workhours.tab';
 const PALETTE = ['#007AFF', '#34C759', '#FF9500', '#FF3B30', '#AF52DE', '#5AC8FA', '#FF2D55', '#A2845E'];
 const CURRENCIES = ['EUR', 'USD', 'GBP', 'SEK', 'NOK', 'DKK', 'CHF', 'CAD', 'AUD'];
+const MULTIPLIERS = [1.5, 2, 2.5, 3];
 const HOUR = 3600000;
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -32,8 +34,12 @@ function loadState() {
   } catch { /* fall through */ }
   return normalize({ jobs: [], entries: [] });
 }
+/** Fills in settings added in later versions, so older saved data keeps working. */
 function normalize(s) {
-  return { jobs: s.jobs, entries: s.entries, settings: { currency: 'EUR', ...(s.settings || {}) } };
+  const set = s.settings || {};
+  const premium = { multiplier: 2, sundays: true, holidays: true, custom: [], ...(set.premium || {}) };
+  if (!Array.isArray(premium.custom)) premium.custom = [];
+  return { jobs: s.jobs, entries: s.entries, settings: { currency: set.currency || 'EUR', premium } };
 }
 function isValidData(s) {
   return s && Array.isArray(s.jobs) && Array.isArray(s.entries) &&
@@ -47,25 +53,121 @@ function save() {
 const uid = () => (crypto.randomUUID ? crypto.randomUUID()
   : Date.now().toString(36) + Math.random().toString(36).slice(2));
 
+/* ================= dates & holidays ================= */
+
+const pad = n => String(n).padStart(2, '0');
+function startOfDay(ts) { const d = new Date(ts); d.setHours(0, 0, 0, 0); return d.getTime(); }
+function addDays(ts, n) { const d = new Date(ts); d.setDate(d.getDate() + n); return d.getTime(); }
+const dayKey = ts => { const d = new Date(ts); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; };
+const keyToTs = key => new Date(key + 'T00:00').getTime();
+
+function easterSunday(y) {
+  const a = y % 19, b = Math.floor(y / 100), c = y % 100, d = Math.floor(b / 4), e = b % 4;
+  const f = Math.floor((b + 8) / 25), g = Math.floor((b - f + 1) / 3);
+  const h = (19 * a + b - d - g + 15) % 30, i = Math.floor(c / 4), k = c % 4;
+  const l = (32 + 2 * e + 2 * i - h - k) % 7, m = Math.floor((a + 11 * h + 22 * l) / 451);
+  const month = Math.floor((h + l - 7 * m + 114) / 31), day = ((h + l - 7 * m + 114) % 31) + 1;
+  return new Date(y, month - 1, day);
+}
+
+const holidayCache = new Map();
+/** Finnish public holidays (incl. Christmas Eve and Midsummer Eve) as Map<'YYYY-MM-DD', name>. */
+function finnishHolidays(year) {
+  if (holidayCache.has(year)) return holidayCache.get(year);
+  const map = new Map();
+  const add = (date, name) => map.set(dayKey(date.getTime()), name);
+  const easter = easterSunday(year);
+  const fromEaster = n => new Date(year, easter.getMonth(), easter.getDate() + n);
+  const weekdayFrom = (month, firstDay, weekday) => {
+    for (let d = firstDay; d < firstDay + 7; d++) {
+      const date = new Date(year, month, d);
+      if (date.getDay() === weekday) return date;
+    }
+  };
+  add(new Date(year, 0, 1), "New Year's Day");
+  add(new Date(year, 0, 6), 'Epiphany');
+  add(fromEaster(-2), 'Good Friday');
+  add(easter, 'Easter Sunday');
+  add(fromEaster(1), 'Easter Monday');
+  add(new Date(year, 4, 1), 'May Day');
+  add(fromEaster(39), 'Ascension Day');
+  add(fromEaster(49), 'Pentecost');
+  add(weekdayFrom(5, 19, 5), 'Midsummer Eve');
+  add(weekdayFrom(5, 20, 6), 'Midsummer Day');
+  add(weekdayFrom(9, 31, 6), "All Saints' Day");
+  add(new Date(year, 11, 6), 'Independence Day');
+  add(new Date(year, 11, 24), 'Christmas Eve');
+  add(new Date(year, 11, 25), 'Christmas Day');
+  add(new Date(year, 11, 26), "St Stephen's Day");
+  holidayCache.set(year, map);
+  return map;
+}
+
+/** Why hours on this day pay extra (holiday name, "Sunday", "Holiday"), or null. */
+function premiumReason(ts) {
+  const p = state.settings.premium;
+  const key = dayKey(ts);
+  if (p.custom.includes(key)) return 'Holiday';
+  if (p.holidays) {
+    const name = finnishHolidays(new Date(ts).getFullYear()).get(key);
+    if (name) return name;
+  }
+  if (p.sundays && new Date(ts).getDay() === 0) return 'Sunday';
+  return null;
+}
+
+function nextPremiumHoliday() {
+  const p = state.settings.premium;
+  const today = dayKey(Date.now());
+  const y = new Date().getFullYear();
+  const candidates = [];
+  if (p.holidays) {
+    for (const year of [y, y + 1]) for (const [k, name] of finnishHolidays(year)) candidates.push([k, name]);
+  }
+  for (const k of p.custom) candidates.push([k, 'Your holiday']);
+  return candidates.filter(([k]) => k >= today).sort((a, b) => a[0].localeCompare(b[0]))[0];
+}
+
 /* ================= model helpers ================= */
 
 const jobById = id => state.jobs.find(j => j.id === id);
 const jobName = job => (job ? job.name : 'No job');
 const jobColor = job => (job ? job.color : '#8E8E93');
 const runningEntry = () => state.entries.find(e => e.end == null);
+const premiumX = () => state.settings.premium.multiplier;
 
+/** Worked time in ms, breaks subtracted. */
 function duration(e, now = Date.now()) {
   return Math.max(0, (e.end ?? now) - e.start - (e.breakMin || 0) * 60000);
 }
+
+/**
+ * Pay multiplier for an entry. payMode: 'auto' (default) pays extra for the part
+ * of the shift that falls on a Sunday/holiday; 'normal' = 1×; 'premium' = always extra.
+ */
+function payFactor(e, now = Date.now()) {
+  const mode = e.payMode || 'auto';
+  if (mode === 'normal') return 1;
+  if (mode === 'premium') return premiumX();
+  const end = e.end ?? now;
+  if (end <= e.start) return premiumReason(e.start) ? premiumX() : 1;
+  let weighted = 0;
+  for (let t = e.start; t < end;) {
+    const next = Math.min(end, addDays(startOfDay(t), 1));
+    weighted += (next - t) * (premiumReason(t) ? premiumX() : 1);
+    t = next;
+  }
+  return weighted / (end - e.start);
+}
+const paidMs = (e, now) => duration(e, now) * payFactor(e, now);
+
 function earnings(e, now = Date.now()) {
   const job = jobById(e.jobId);
-  return job && job.rate ? (duration(e, now) / HOUR) * job.rate : 0;
+  return job && job.rate ? (paidMs(e, now) / HOUR) * job.rate : 0;
 }
 const sum = (list, now) => list.reduce((acc, e) => acc + duration(e, now), 0);
-const sumEarnings = list => list.reduce((acc, e) => acc + earnings(e), 0);
-
-function startOfDay(ts) { const d = new Date(ts); d.setHours(0, 0, 0, 0); return d.getTime(); }
-function addDays(ts, n) { const d = new Date(ts); d.setDate(d.getDate() + n); return d.getTime(); }
+const sumPaid = (list, now) => list.reduce((acc, e) => acc + paidMs(e, now), 0);
+const sumEarnings = (list, now) => list.reduce((acc, e) => acc + earnings(e, now), 0);
 
 function entriesBetween(start, end) {
   return state.entries.filter(e => e.start >= start && e.start < end);
@@ -77,8 +179,6 @@ function lastUsedJobId() {
 }
 
 /* ================= formatting ================= */
-
-const pad = n => String(n).padStart(2, '0');
 
 function fmtHours(ms) {
   const total = Math.floor(ms / 60000);
@@ -99,7 +199,9 @@ function fmtMoney(v) {
   }
   return moneyFormatter.format(v);
 }
+const fmtFactor = f => `${Number(f.toFixed(2))}×`;
 const fmtTime = ts => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+const fmtDate = ts => new Date(ts).toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' });
 
 function dayLabel(dayStart) {
   const today = startOfDay(Date.now());
@@ -113,12 +215,20 @@ function dayLabel(dayStart) {
 
 function toLocalInput(ts) {
   const d = new Date(ts);
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  return `${dayKey(ts)}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 const fromLocalInput = v => (v ? new Date(v).getTime() : NaN);
 
 function esc(s) {
   return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+const initial = name => ([...String(name).trim()][0] || '?').toUpperCase();
+
+/** Lighten (amt > 0) or darken (amt < 0) a #RRGGBB colour. */
+function shade(hex, amt) {
+  const n = parseInt(hex.slice(1), 16);
+  const f = c => Math.round(Math.min(255, Math.max(0, c + 255 * amt)));
+  return `rgb(${f(n >> 16)}, ${f((n >> 8) & 255)}, ${f(n & 255)})`;
 }
 
 /* ================= small UI pieces ================= */
@@ -129,13 +239,15 @@ const icons = {
   left: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 5l-7 7 7 7"/></svg>',
   right: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5l7 7-7 7"/></svg>',
   chev: '<svg class="chev" width="8" height="14" viewBox="0 0 8 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 1l6 6-6 6"/></svg>',
-  play: color => `<svg class="play" viewBox="0 0 28 28"><circle cx="14" cy="14" r="14" fill="${color}"/><path d="M11 8.5v11l9-5.5z" fill="#fff"/></svg>`,
-  swap: color => `<svg class="play" viewBox="0 0 28 28" fill="none" stroke="${color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 10h12l-3-3M20 18H8l3 3"/></svg>`,
+  play: '<svg viewBox="0 0 24 24"><path d="M8 5.5v13l10.5-6.5z" fill="currentColor"/></svg>',
+  swap: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 9h13l-3.5-3.5M19 15H6l3.5 3.5"/></svg>',
+  stop: '<svg width="14" height="14" viewBox="0 0 14 14"><rect width="14" height="14" rx="3" fill="currentColor"/></svg>',
 };
 
 const sectionTitle = (text, right = '') => `<div class="section-title"><span>${text}</span><span>${right}</span></div>`;
 const actionBtn = (action, icon, label, extra = '') =>
   `<button class="icon-btn" data-action="${action}" aria-label="${label}" ${extra}>${icon}</button>`;
+const factorPill = f => (f > 1.001 ? `<span class="pill">${fmtFactor(f)}</span>` : '');
 
 function entryRow(e) {
   const job = jobById(e.jobId);
@@ -145,7 +257,7 @@ function entryRow(e) {
   return `<button class="row" data-action="edit-entry" data-id="${e.id}">
     <span class="bar" style="background:${jobColor(job)}"></span>
     <span class="grow">
-      <span class="block">${esc(jobName(job))}</span>
+      <span class="block">${esc(jobName(job))} ${factorPill(payFactor(e))}</span>
       <span class="sub block">${range}</span>
       ${e.note ? `<span class="sub block clamp">${esc(e.note)}</span>` : ''}
     </span>
@@ -156,53 +268,82 @@ function entryRow(e) {
   </button>`;
 }
 
+function weekBars(range, list) {
+  const today = startOfDay(Date.now());
+  const days = Array.from({ length: 7 }, (_, i) => addDays(range.start, i));
+  const totals = days.map(d => sum(list.filter(e => e.start >= d && e.start < addDays(d, 1))));
+  const max = Math.max(...totals, 8 * HOUR);
+  return `<div class="mini-bars">${days.map((d, i) => `
+    <div class="mb ${d === today ? 'today' : ''} ${premiumReason(d) ? 'premium' : ''}">
+      <div class="mb-track"><div class="mb-fill" style="height:${(totals[i] / max) * 100}%"></div></div>
+      <span>${new Date(d).toLocaleDateString([], { weekday: 'narrow' })}</span>
+    </div>`).join('')}</div>`;
+}
+
 /* ================= views ================= */
 
 function renderTimer() {
+  if (!state.jobs.length) {
+    return {
+      title: 'Work Hours',
+      html: `<div class="empty"><div class="empty-icon">⏱</div><b>Welcome!</b>Add the jobs you work on, then tap one here to start the clock.
+        <br><button class="btn" data-action="add-job">Add your first job</button></div>`,
+    };
+  }
+
+  const now = Date.now();
   const run = runningEntry();
+  const week = periodRange('week', now);
+  const weekList = entriesBetween(week.start, week.end);
   let html = '';
 
   if (run) {
     const job = jobById(run.jobId);
-    html += sectionTitle('Working now') + `
-      <div class="group card">
-        <div class="card-head">
-          <span class="dot" style="background:${jobColor(job)}"></span>
-          <b class="grow">${esc(jobName(job))}</b>
-          <span class="sub">since ${fmtTime(run.start)}</span>
-        </div>
-        <div class="clock" data-live="clock">${fmtClock(duration(run))}</div>
-        ${job && job.rate ? `<div class="sub center" data-live="earn">${fmtMoney(earnings(run))}</div>` : ''}
-        <button class="btn danger" data-action="stop" style="margin-top:18px">
-          <svg width="14" height="14" viewBox="0 0 14 14"><rect width="14" height="14" rx="2.5" fill="#fff"/></svg> Stop
-        </button>
-      </div>`;
+    const c = jobColor(job);
+    const mode = run.payMode || 'auto';
+    const reason = mode === 'premium' ? 'Double pay' : mode === 'auto' ? premiumReason(now) : null;
+    html += `<section class="hero running" style="--c:${c};--c2:${shade(c, -0.22)}">
+      <div class="hero-top"><span class="live-dot"></span>Working on
+        ${reason ? `<span class="pill light">${fmtFactor(premiumX())} · ${esc(reason)}</span>` : ''}</div>
+      <div class="hero-job">${esc(jobName(job))}</div>
+      <div class="clock" data-live="clock">${fmtClock(duration(run))}</div>
+      <div class="hero-sub">Started ${fmtTime(run.start)}${job && job.rate ? ` · <span data-live="earn">${fmtMoney(earnings(run))}</span>` : ''}</div>
+      <button class="btn stop" data-action="stop">${icons.stop} Stop</button>
+    </section>`;
+  } else {
+    const reason = premiumReason(now);
+    const earned = sumEarnings(weekList);
+    html += `<section class="hero idle">
+      <div class="hero-top">This week
+        ${reason ? `<span class="pill">Today ${fmtFactor(premiumX())} · ${esc(reason)}</span>` : ''}</div>
+      <div class="hero-stats">
+        <div><b>${fmtHours(sum(weekList))}</b><span>worked</span></div>
+        ${earned > 0 ? `<div><b>${fmtMoney(earned)}</b><span>earned</span></div>` : ''}
+      </div>
+      ${weekBars(week, weekList)}
+    </section>`;
   }
 
-  if (!state.jobs.length) {
-    html += `<div class="empty"><b>Welcome!</b>Add the jobs you work on, then tap one here to start the clock.
-      <br><button class="btn" data-action="add-job">Add your first job</button></div>`;
-    return { title: 'Work Hours', html };
-  }
-
-  html += sectionTitle(run ? 'Switch to' : 'Start working on') + '<div class="group">' +
+  html += sectionTitle(run ? 'Switch job' : 'Tap a job to start') + '<div class="tiles">' +
     state.jobs.map(j => {
       const current = run && run.jobId === j.id;
-      return `<button class="row" data-action="start" data-id="${j.id}" ${current ? 'disabled' : ''}>
-        <span class="dot" style="background:${j.color}"></span>
-        <span class="grow">${esc(j.name)}</span>
-        ${current ? '<span class="sub">Running</span>' : (run ? icons.swap(j.color) : icons.play(j.color))}
+      const wk = sum(weekList.filter(e => e.jobId === j.id));
+      return `<button class="tile ${current ? 'current' : ''}" data-action="start" data-id="${j.id}" ${current ? 'disabled' : ''} style="--c:${j.color}">
+        <span class="tile-icon">${esc(initial(j.name))}</span>
+        ${current ? '' : `<span class="tile-go">${run ? icons.swap : icons.play}</span>`}
+        <span class="tile-name">${esc(j.name)}</span>
+        <span class="tile-sub">${current ? '● Running now' : `${fmtHours(wk)} this week`}</span>
       </button>`;
     }).join('') + '</div>';
 
-  const today = startOfDay(Date.now());
+  const today = startOfDay(now);
   const todays = entriesBetween(today, addDays(today, 1)).sort((a, b) => b.start - a.start);
   if (todays.length) {
     html += sectionTitle('Today', `<span data-live="today">${fmtHours(sum(todays))}</span>`) +
       `<div class="group">${todays.map(entryRow).join('')}</div>`;
   }
 
-  html += `<div class="group mt"><button class="row accent" data-action="add-entry">Add hours manually…</button></div>`;
+  html += `<div class="group mt"><button class="row accent" data-action="add-entry">${icons.plus.replace('<svg', '<svg class="row-icon"')} Add hours manually</button></div>`;
   return { title: 'Work Hours', html };
 }
 
@@ -211,7 +352,7 @@ function renderEntries() {
   if (!state.entries.length) {
     return {
       title: 'Entries', actions,
-      html: `<div class="empty"><b>No entries yet</b>Start a timer, or tap + to add hours manually.</div>`,
+      html: `<div class="empty"><div class="empty-icon">🗒</div><b>No entries yet</b>Start a timer, or tap + to add hours manually.</div>`,
     };
   }
   const groups = new Map();
@@ -222,7 +363,11 @@ function renderEntries() {
   }
   let html = '';
   for (const [day, list] of groups) {
-    html += sectionTitle(dayLabel(day), fmtHours(sum(list))) +
+    const reason = premiumReason(day);
+    const label = dayLabel(day);
+    const tag = reason && !(reason === 'Sunday' && label.startsWith('Sunday'))
+      ? ` <span class="pill">${esc(reason)}</span>` : '';
+    html += sectionTitle(esc(label) + tag, fmtHours(sum(list))) +
       `<div class="group">${list.map(entryRow).join('')}</div>`;
   }
   return { title: 'Entries', actions, html };
@@ -273,7 +418,7 @@ function chartHTML(period, range, list) {
       const start = new Date(y, m, 1);
       buckets.push({
         start: start.getTime(), end: new Date(y, m + 1, 1).getTime(),
-        label: start.toLocaleDateString([], { month: 'narrow' }),
+        label: start.toLocaleDateString([], { month: 'narrow' }), premium: false,
       });
     }
   } else {
@@ -282,7 +427,7 @@ function chartHTML(period, range, list) {
       const label = period === 'week'
         ? d.toLocaleDateString([], { weekday: 'short' })
         : (d.getDate() === 1 || d.getDate() % 5 === 0 ? String(d.getDate()) : '');
-      buckets.push({ start: t, end: addDays(t, 1), label });
+      buckets.push({ start: t, end: addDays(t, 1), label, premium: !!premiumReason(t) });
     }
   }
 
@@ -307,7 +452,7 @@ function chartHTML(period, range, list) {
       .join('');
     return `<div class="col">${segs}</div>`;
   }).join('');
-  const labels = buckets.map(b => `<span>${b.label}</span>`).join('');
+  const labels = buckets.map(b => `<span class="${b.premium && period === 'week' ? 'premium' : ''}">${b.label}</span>`).join('');
   return `<div class="chart">${cols}</div><div class="chart-labels">${labels}</div>`;
 }
 
@@ -315,14 +460,17 @@ function renderSummary() {
   const { period } = summary;
   const range = periodRange(period, summary.anchor);
   const list = entriesBetween(range.start, range.end);
-  const total = sum(list);
+  const worked = sum(list);
+  const paid = sumPaid(list);
   const totalEarnings = sumEarnings(list);
+  const hasExtra = paid - worked >= 60000;
 
   const perJob = new Map();
   for (const e of list) {
     const key = jobById(e.jobId) ? e.jobId : undefined;
-    const cur = perJob.get(key) || { ms: 0, earn: 0 };
+    const cur = perJob.get(key) || { ms: 0, paid: 0, earn: 0 };
     cur.ms += duration(e);
+    cur.paid += paidMs(e);
     cur.earn += earnings(e);
     perJob.set(key, cur);
   }
@@ -336,13 +484,15 @@ function renderSummary() {
       <b data-action="this-period">${periodTitle(period, range)}</b>
       ${actionBtn('shift', icons.right, 'Next', `data-arg="1" ${range.end > Date.now() ? 'disabled' : ''}`)}
     </div>
-    <div class="group mt">
+    <div class="group">
       <div class="stats">
-        <div class="stat"><b>${fmtHours(total)}</b><span class="sub">Hours</span></div>
+        <div class="stat"><b>${fmtHours(worked)}</b><span class="sub">Worked</span></div>
+        ${hasExtra ? `<div class="stat"><b>${fmtHours(paid)}</b><span class="sub">Paid hours</span></div>` : ''}
         ${totalEarnings > 0 ? `<div class="stat"><b>${fmtMoney(totalEarnings)}</b><span class="sub">Earnings</span></div>` : ''}
       </div>
-      ${total > 0 ? chartHTML(period, range, list) : ''}
-    </div>`;
+      ${worked > 0 ? chartHTML(period, range, list) : ''}
+    </div>
+    ${hasExtra ? `<p class="hint">Includes ${fmtHours(paid - worked)} extra from Sunday and holiday pay.</p>` : ''}`;
 
   html += sectionTitle('By job');
   if (!jobRows.length) {
@@ -350,14 +500,17 @@ function renderSummary() {
   } else {
     html += '<div class="group">' + jobRows.map(([id, v]) => {
       const job = jobById(id);
+      const subParts = [];
+      if (v.earn > 0) subParts.push(fmtMoney(v.earn));
+      if (v.paid - v.ms >= 60000) subParts.push(`+${fmtHours(v.paid - v.ms)} extra`);
       return `<div class="row">
-        <span class="dot" style="background:${jobColor(job)}"></span>
+        <span class="avatar" style="--c:${jobColor(job)}">${esc(initial(jobName(job)))}</span>
         <span class="grow">${esc(jobName(job))}
-          <span class="progress block"><i style="width:${(v.ms / total) * 100}%;background:${jobColor(job)}"></i></span>
+          <span class="progress block"><i style="width:${(v.ms / worked) * 100}%;background:${jobColor(job)}"></i></span>
         </span>
         <span class="right">
           <span class="block">${fmtHours(v.ms)}</span>
-          ${v.earn > 0 ? `<span class="sub block">${fmtMoney(v.earn)}</span>` : ''}
+          ${subParts.length ? `<span class="sub block">${subParts.join(' · ')}</span>` : ''}
         </span>
       </div>`;
     }).join('') + '</div>';
@@ -369,16 +522,17 @@ function renderSummary() {
 
 function renderJobs() {
   const actions = actionBtn('add-job', icons.plus, 'Add job');
+  const p = state.settings.premium;
   let html = '';
 
   if (!state.jobs.length) {
-    html += `<div class="empty"><b>No jobs yet</b>Add the jobs you want to track hours for.
+    html += `<div class="empty"><div class="empty-icon">💼</div><b>No jobs yet</b>Add the jobs you want to track hours for.
       <br><button class="btn" data-action="add-job">Add Job</button></div>`;
   } else {
     html += sectionTitle('Your jobs') + '<div class="group">' + state.jobs.map(j => {
       const total = sum(state.entries.filter(e => e.jobId === j.id));
       return `<button class="row" data-action="edit-job" data-id="${j.id}">
-        <span class="dot" style="background:${j.color}"></span>
+        <span class="avatar" style="--c:${j.color}">${esc(initial(j.name))}</span>
         <span class="grow">${esc(j.name)}
           ${j.rate ? `<span class="sub block">${fmtMoney(j.rate)} / h</span>` : ''}
         </span>
@@ -387,6 +541,26 @@ function renderJobs() {
       </button>`;
     }).join('') + '</div>';
   }
+
+  const next = nextPremiumHoliday();
+  html += sectionTitle('Sunday &amp; holiday pay') + `<div class="group">
+    <label class="row field"><span class="grow">Sundays</span>
+      <input type="checkbox" class="switch" data-change="p-sundays" ${p.sundays ? 'checked' : ''}></label>
+    <label class="row field"><span class="grow">Finnish public holidays
+        ${p.holidays && next ? `<span class="sub block">Next: ${esc(next[1])}, ${fmtDate(keyToTs(next[0]))}</span>` : ''}</span>
+      <input type="checkbox" class="switch" data-change="p-holidays" ${p.holidays ? 'checked' : ''}></label>
+    <label class="row field"><span>Pay on these days</span>
+      <select data-change="p-mult">${MULTIPLIERS.map(m =>
+        `<option value="${m}" ${m === p.multiplier ? 'selected' : ''}>${fmtFactor(m)}</option>`).join('')}</select></label>
+  </div>`;
+
+  html += sectionTitle('Your own holiday days') + '<div class="group">' +
+    [...p.custom].sort().map(k => `<div class="row"><span class="grow">${fmtDate(keyToTs(k))}</span>
+      <button class="link danger" data-action="p-remove" data-arg="${k}">Remove</button></div>`).join('') +
+    `<label class="row field"><span class="grow accent">Add a day</span><input type="date" data-change="p-add"></label>
+  </div>
+  <p class="hint">Hours on Sundays and holidays count ${fmtFactor(p.multiplier)} in paid hours and earnings.
+    You can change this for a single entry when you edit it.</p>`;
 
   html += sectionTitle('Settings') + `<div class="group">
     <label class="row field"><span>Currency</span>
@@ -403,7 +577,7 @@ function renderJobs() {
     </label>
   </div>
   <p class="hint">Your data is stored only on this phone. Save a backup file to iCloud Drive now and then,
-    so you can restore it if you switch phones or clear Safari's data.</p>`;
+    so you can restore it if you switch phones.</p>`;
 
   const standalone = window.matchMedia('(display-mode: standalone)').matches || navigator.standalone;
   if (!standalone) {
@@ -481,6 +655,8 @@ function entrySheet(id) {
   const start = entry ? entry.start : now - 8 * HOUR;
   const end = entry && entry.end != null ? entry.end : now;
   const selectedJob = entry ? entry.jobId : lastUsedJobId();
+  const mode = (entry && entry.payMode) || 'auto';
+  const payOpt = (value, label) => `<label><input type="radio" name="payMode" value="${value}" ${mode === value ? 'checked' : ''}><span>${label}</span></label>`;
 
   const body = `
     <div class="group">
@@ -492,9 +668,16 @@ function entrySheet(id) {
     </div>
     <div class="group mt">
       <label class="row field"><span>Start</span><input type="datetime-local" name="start" value="${toLocalInput(start)}"></label>
-      ${isRunning ? '<label class="row field"><span class="grow">Still running</span><input type="checkbox" name="running" checked></label>' : ''}
+      ${isRunning ? '<label class="row field"><span class="grow">Still running</span><input type="checkbox" class="switch" name="running" checked></label>' : ''}
       <label class="row field" data-end-row ${isRunning ? 'hidden' : ''}><span>End</span><input type="datetime-local" name="end" value="${toLocalInput(end)}"></label>
       <label class="row field"><span>Break (minutes)</span><input type="number" name="breakMin" min="0" max="600" step="5" inputmode="numeric" value="${entry ? entry.breakMin || 0 : 0}"></label>
+    </div>
+    <div class="section-title"><span>Pay</span></div>
+    <div class="group">
+      <div class="seg-radio">
+        ${payOpt('auto', 'Auto')}${payOpt('normal', 'Normal 1×')}${payOpt('premium', `Double ${fmtFactor(premiumX())}`)}
+      </div>
+      <p class="hint pad" data-pay-hint></p>
     </div>
     <div class="group mt">
       <label class="row field"><textarea name="note" rows="2" placeholder="Note (optional)">${esc(entry ? entry.note || '' : '')}</textarea></label>
@@ -503,40 +686,54 @@ function entrySheet(id) {
     <p class="error" data-error hidden></p>
     ${entry ? '<button type="button" class="btn plain danger-text mt" data-delete>Delete Entry</button>' : ''}`;
 
-  const form = openSheet(entry ? 'Edit Entry' : 'Add Hours', body, f => {
+  const readForm = f => {
     const el = f.elements;
     const running = el.running ? el.running.checked : false;
-    const s = fromLocalInput(el.start.value);
-    const e = running ? null : fromLocalInput(el.end.value);
-    if (Number.isNaN(s)) return showError(f, 'Please choose a start time.'), false;
-    if (!running && (Number.isNaN(e) || e <= s)) return showError(f, 'End must be after start.'), false;
-    const data = {
+    return {
+      running,
       jobId: el.job.value,
-      start: s,
-      end: e,
+      start: fromLocalInput(el.start.value),
+      end: running ? null : fromLocalInput(el.end.value),
       breakMin: Math.max(0, parseInt(el.breakMin.value, 10) || 0),
+      payMode: el.payMode.value || 'auto',
       note: el.note.value.trim(),
     };
+  };
+
+  const form = openSheet(entry ? 'Edit Entry' : 'Add Hours', body, f => {
+    const { running, ...data } = readForm(f);
+    if (Number.isNaN(data.start)) return showError(f, 'Please choose a start time.'), false;
+    if (!running && (Number.isNaN(data.end) || data.end <= data.start)) return showError(f, 'End must be after start.'), false;
     if (entry) Object.assign(entry, data);
     else state.entries.push({ id: uid(), ...data });
     save();
     render();
   });
 
-  const el = form.elements;
-  const updateTotal = () => {
-    const running = el.running ? el.running.checked : false;
-    const s = fromLocalInput(el.start.value);
-    const e = running ? Date.now() : fromLocalInput(el.end.value);
-    const ms = Math.max(0, e - s - (parseInt(el.breakMin.value, 10) || 0) * 60000);
-    const job = jobById(el.job.value);
-    $('[data-total]', form).textContent = Number.isNaN(ms) ? '–'
-      : fmtHours(ms) + (job && job.rate ? ` · ${fmtMoney((ms / HOUR) * job.rate)}` : '');
-    $('[data-end-row]', form).hidden = running;
+  const update = () => {
+    const d = readForm(form);
+    $('[data-end-row]', form).hidden = d.running;
+    const job = jobById(d.jobId);
+    const valid = !Number.isNaN(d.start) && (d.running || (!Number.isNaN(d.end) && d.end > d.start));
+    let autoHint = 'Normal day. Sundays and holidays pay extra automatically.';
+    if (valid) {
+      const f = payFactor({ ...d, payMode: 'auto' });
+      const reason = premiumReason(d.start) || premiumReason((d.end ?? Date.now()) - 1);
+      if (f >= premiumX() - 0.001) autoHint = `${reason}, so this entry pays ${fmtFactor(premiumX())}.`;
+      else if (f > 1.001) autoHint = `Part of this shift is on a ${reason === 'Sunday' ? 'Sunday' : 'holiday'}, so it pays ${fmtFactor(f)} overall.`;
+    }
+    $('[data-pay-hint]', form).textContent = d.payMode === 'auto' ? autoHint
+      : d.payMode === 'premium' ? `This entry always pays ${fmtFactor(premiumX())}.` : 'This entry always pays 1×, even on a holiday.';
+    if (!valid) { $('[data-total]', form).textContent = '–'; return; }
+    const worked = duration(d);
+    const paid = paidMs(d);
+    $('[data-total]', form).textContent = fmtHours(worked) +
+      (paid - worked >= 60000 ? ` → ${fmtHours(paid)} paid` : '') +
+      (job && job.rate ? ` · ${fmtMoney((paid / HOUR) * job.rate)}` : '');
   };
-  form.addEventListener('input', updateTotal);
-  form.addEventListener('change', updateTotal);
-  updateTotal();
+  form.addEventListener('input', update);
+  form.addEventListener('change', update);
+  update();
 
   const del = $('[data-delete]', form);
   if (del) del.addEventListener('click', () => {
@@ -598,13 +795,13 @@ function jobSheet(id) {
 
 function csvFor(list) {
   const q = s => `"${String(s).replace(/"/g, '""')}"`;
-  const date = ts => { const d = new Date(ts); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; };
   const time = ts => { const d = new Date(ts); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
-  const rows = [['Date', 'Job', 'Start', 'End', 'Break (min)', 'Hours', 'Earnings', 'Note'].join(',')];
+  const rows = [['Date', 'Job', 'Start', 'End', 'Break (min)', 'Hours', 'Pay factor', 'Paid hours', 'Earnings', 'Note'].join(',')];
   for (const e of [...list].sort((a, b) => a.start - b.start)) {
     rows.push([
-      date(e.start), q(jobName(jobById(e.jobId))), time(e.start), e.end == null ? '' : time(e.end),
-      e.breakMin || 0, (duration(e) / HOUR).toFixed(2), earnings(e).toFixed(2), q(e.note || ''),
+      dayKey(e.start), q(jobName(jobById(e.jobId))), time(e.start), e.end == null ? '' : time(e.end),
+      e.breakMin || 0, (duration(e) / HOUR).toFixed(2), payFactor(e).toFixed(2), (paidMs(e) / HOUR).toFixed(2),
+      earnings(e).toFixed(2), q(e.note || ''),
     ].join(','));
   }
   return rows.join('\n');
@@ -626,7 +823,7 @@ async function shareFile(name, text, type) {
   setTimeout(() => URL.revokeObjectURL(url), 2000);
 }
 
-const stamp = () => { const d = new Date(); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; };
+const stamp = () => dayKey(Date.now());
 
 function importBackup(file) {
   const reader = new FileReader();
@@ -665,6 +862,11 @@ const actions = {
   period(_, arg) { summary.period = arg; summary.anchor = Date.now(); render(); },
   shift(_, arg) { summary.anchor = shiftAnchor(summary.period, summary.anchor, Number(arg)); render(); },
   'this-period'() { summary.anchor = Date.now(); render(); },
+  'p-remove'(_, key) {
+    state.settings.premium.custom = state.settings.premium.custom.filter(k => k !== key);
+    save();
+    render();
+  },
   'export-period'() {
     const range = periodRange(summary.period, summary.anchor);
     shareFile(`work-hours-${summary.period}-${stamp()}.csv`, csvFor(entriesBetween(range.start, range.end)), 'text/csv');
@@ -683,15 +885,25 @@ view.addEventListener('click', onAction);
 topActions.addEventListener('click', onAction);
 
 view.addEventListener('change', ev => {
-  const kind = ev.target.dataset.change;
-  if (kind === 'currency') {
-    state.settings.currency = ev.target.value;
-    save();
-    render();
-  } else if (kind === 'import' && ev.target.files[0]) {
-    importBackup(ev.target.files[0]);
-    ev.target.value = '';
+  const t = ev.target;
+  const p = state.settings.premium;
+  switch (t.dataset.change) {
+    case 'currency': state.settings.currency = t.value; break;
+    case 'p-sundays': p.sundays = t.checked; break;
+    case 'p-holidays': p.holidays = t.checked; break;
+    case 'p-mult': p.multiplier = Number(t.value); break;
+    case 'p-add':
+      if (!t.value || p.custom.includes(t.value)) return;
+      p.custom.push(t.value);
+      break;
+    case 'import':
+      if (t.files[0]) importBackup(t.files[0]);
+      t.value = '';
+      return;
+    default: return;
   }
+  save();
+  render();
 });
 
 document.querySelector('.tabbar').addEventListener('click', ev => {
@@ -713,5 +925,13 @@ render();
 /* Ask the browser not to evict our data, and cache the app for offline use. */
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
 if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
-  navigator.serviceWorker.register('sw.js').catch(() => {});
+  // When a new version is deployed, the new service worker takes over and we reload once to show it.
+  const hadController = !!navigator.serviceWorker.controller;
+  let reloading = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (!hadController || reloading || sheet.open) return;
+    reloading = true;
+    location.reload();
+  });
+  navigator.serviceWorker.register('sw.js').then(reg => reg.update()).catch(() => {});
 }
