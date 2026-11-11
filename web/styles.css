@@ -8,6 +8,8 @@
   --danger: #ff3b30;
   --orange: #ff9500;
   --orange-text: #c26a00;
+  --red: #e5251b;
+  --red-soft: rgba(255, 59, 48, 0.13);
   --fill: rgba(118, 118, 128, 0.12);
   --tabbar: rgba(249, 249, 249, 0.9);
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.04), 0 6px 20px rgba(0, 0, 0, 0.05);
@@ -26,6 +28,8 @@
     --danger: #ff453a;
     --orange: #ff9f0a;
     --orange-text: #ffb340;
+    --red: #ff6961;
+    --red-soft: rgba(255, 69, 58, 0.22);
     --fill: rgba(118, 118, 128, 0.24);
     --tabbar: rgba(22, 22, 22, 0.9);
     --shadow: none;
@@ -120,6 +124,51 @@ button.row:disabled { opacity: 1; cursor: default; }
   white-space: nowrap;
 }
 .pill.light { background: rgba(255, 255, 255, 0.24); color: #fff; }
+.pill.red { background: var(--red-soft); color: var(--red); }
+.pill.red.off { background: var(--fill); color: var(--muted); text-decoration: line-through; }
+
+/* ---------- calendar ---------- */
+.cal { background: var(--card); border-radius: 20px; box-shadow: var(--shadow); padding: 10px 6px 4px; }
+.cal-week, .cal-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); }
+.cal-week span {
+  text-align: center; font-size: 12px; font-weight: 700; color: var(--muted);
+  text-transform: uppercase; padding: 4px 0 6px;
+}
+.cal-week span.sun { color: var(--red); }
+.cal-day {
+  display: flex; flex-direction: column; align-items: center; gap: 1px;
+  padding: 3px 0 5px; background: none; border: 0; border-radius: 12px;
+}
+.cal-day:active { background: var(--fill); }
+.cal-day .num {
+  width: 36px; height: 36px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 17px; font-weight: 500; font-variant-numeric: tabular-nums;
+}
+.cal-day.sunday .num, .cal-day.holiday .num { color: var(--red); font-weight: 700; }
+.cal-day.holiday .num { background: var(--red-soft); }
+.cal-day.excluded .num { text-decoration: line-through; text-decoration-color: var(--red); }
+.cal-day.today .num { background: var(--accent); color: #fff; font-weight: 700; }
+.cal-day.today.holiday .num, .cal-day.today.sunday .num { background: var(--red); color: #fff; }
+.cal-day.out { opacity: 0.32; }
+.cal-day .hrs { height: 13px; font-size: 11px; font-weight: 700; color: var(--accent); font-variant-numeric: tabular-nums; }
+.cal-foot {
+  display: flex; justify-content: space-between; align-items: center;
+  font-size: 13px; color: var(--muted); padding: 8px 10px 8px; border-top: 0.5px solid var(--sep); margin-top: 4px;
+}
+.key { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; vertical-align: -1px; }
+.key.red { background: var(--red); }
+
+.hol-date {
+  width: 34px; height: 34px; border-radius: 10px; flex: none;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--red-soft); color: var(--red); font-weight: 800;
+}
+.hol-date.off { background: var(--fill); color: var(--muted); text-decoration: line-through; }
+
+.day-title { font-size: 22px; font-weight: 800; margin: 2px 4px 16px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.day-title.red { color: var(--red); }
+.day-title .pill { font-size: 13px; }
 
 /* ---------- hero cards (timer tab) ---------- */
 .hero { border-radius: 24px; padding: 18px 18px 20px; margin-top: 6px; }
@@ -159,9 +208,9 @@ button.row:disabled { opacity: 1; cursor: default; }
   background: var(--fill); display: flex; align-items: flex-end; overflow: hidden;
 }
 .mb-fill { width: 100%; background: var(--accent); border-radius: 7px; }
-.mb.premium .mb-fill { background: var(--orange); }
+.mb.premium .mb-fill { background: var(--red); }
 .mb span { font-size: 11px; font-weight: 600; color: var(--muted); }
-.mb.premium span { color: var(--orange-text); }
+.mb.premium span { color: var(--red); }
 .mb.today span { color: var(--text); font-weight: 800; }
 
 /* ---------- job tiles ---------- */
@@ -234,7 +283,7 @@ button.row:disabled { opacity: 1; cursor: default; }
 .chart .seg:last-child { border-radius: 4px 4px 0 0; }
 .chart-labels { display: flex; gap: 3px; padding: 5px 16px 14px; font-size: 10px; color: var(--muted); }
 .chart-labels span { flex: 1; text-align: center; white-space: nowrap; overflow: visible; }
-.chart-labels span.premium { color: var(--orange-text); font-weight: 700; }
+.chart-labels span.premium { color: var(--red); font-weight: 700; }
 
 .progress { height: 5px; border-radius: 3px; background: var(--fill); margin-top: 6px; overflow: hidden; }
 .progress i { display: block; height: 100%; border-radius: 3px; }
