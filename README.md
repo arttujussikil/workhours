@@ -2,6 +2,10 @@
 
 Track your working hours on different jobs from your iPhone.
 
+### 👉 [Open the app](https://arttujussikil.github.io/workhours/)
+
+`https://arttujussikil.github.io/workhours/` — open it in Safari on your iPhone, then *Share → Add to Home Screen*.
+
 This repo has two versions of the app:
 
 | Folder | What it is | How it gets on the phone |
@@ -12,6 +16,8 @@ This repo has two versions of the app:
 ## Features
 
 - **Timer**: tap a job to start the clock and tap Stop when you're done. Tapping another job switches to it. Shows a live clock, earnings so far, and today's total.
+- **Calendar**: month view with Finnish holidays and Sundays in red and the hours worked on each day. Tap a day to add, name or switch off a holiday.
+- **Sunday & holiday pay**: hours on Sundays and holidays count double (or another multiplier you pick).
 - **Entries**: every work session grouped by day, with daily totals. Tap one to edit its start, end, break or note, or add hours you forgot to time.
 - **Summary**: hours and earnings per week, month or year, with a stacked bar chart and per-job totals. The share button exports the period as CSV.
 - **Jobs**: name, optional hourly rate and color. Also has the currency setting and backup/restore.
@@ -20,7 +26,7 @@ This repo has two versions of the app:
 
 ### Install on iPhone
 
-1. Open the GitHub Pages URL in **Safari** (it must be Safari).
+1. Open [arttujussikil.github.io/workhours](https://arttujussikil.github.io/workhours/) in **Safari** (it must be Safari).
 2. Tap **Share** → **Add to Home Screen** → **Add**.
 3. Open *Work Hours* from the home screen. It runs full-screen and works offline.
 
