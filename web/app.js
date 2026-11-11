@@ -19,6 +19,7 @@ const topActions = $('#topActions');
 let state = loadState();
 let tab = readPref(TAB_KEY, 'timer');
 const summary = { period: 'week', anchor: Date.now() };
+const calendar = { anchor: Date.now() };
 
 function readPref(key, fallback) {
   try { return localStorage.getItem(key) || fallback; } catch { return fallback; }
@@ -37,8 +38,12 @@ function loadState() {
 /** Fills in settings added in later versions, so older saved data keeps working. */
 function normalize(s) {
   const set = s.settings || {};
-  const premium = { multiplier: 2, sundays: true, holidays: true, custom: [], ...(set.premium || {}) };
+  // custom: extra holiday days ('YYYY-MM-DD'), names: their optional names,
+  // excluded: built-in Finnish holidays the user does not get extra pay for.
+  const premium = { multiplier: 2, sundays: true, holidays: true, custom: [], names: {}, excluded: [], ...(set.premium || {}) };
   if (!Array.isArray(premium.custom)) premium.custom = [];
+  if (!Array.isArray(premium.excluded)) premium.excluded = [];
+  if (!premium.names || typeof premium.names !== 'object') premium.names = {};
   return { jobs: s.jobs, entries: s.entries, settings: { currency: set.currency || 'EUR', premium } };
 }
 function isValidData(s) {
@@ -103,29 +108,47 @@ function finnishHolidays(year) {
   return map;
 }
 
-/** Why hours on this day pay extra (holiday name, "Sunday", "Holiday"), or null. */
-function premiumReason(ts) {
+/** The official Finnish holiday on this day (name), or null. Ignores the user's settings. */
+function officialHoliday(ts) {
+  return finnishHolidays(new Date(ts).getFullYear()).get(dayKey(ts)) || null;
+}
+
+/** Name of the holiday on this day that pays extra (built-in or the user's own), or null. */
+function holidayName(ts) {
   const p = state.settings.premium;
   const key = dayKey(ts);
-  if (p.custom.includes(key)) return 'Holiday';
-  if (p.holidays) {
-    const name = finnishHolidays(new Date(ts).getFullYear()).get(key);
-    if (name) return name;
-  }
-  if (p.sundays && new Date(ts).getDay() === 0) return 'Sunday';
+  if (p.custom.includes(key)) return p.names[key] || 'Holiday';
+  if (p.holidays && !p.excluded.includes(key)) return officialHoliday(ts);
   return null;
 }
 
-function nextPremiumHoliday() {
+/** Why hours on this day pay extra (holiday name or "Sunday"), or null. */
+function premiumReason(ts) {
+  return holidayName(ts) ||
+    (state.settings.premium.sundays && new Date(ts).getDay() === 0 ? 'Sunday' : null);
+}
+
+function setHoliday(key, on) {
   const p = state.settings.premium;
-  const today = dayKey(Date.now());
-  const y = new Date().getFullYear();
-  const candidates = [];
-  if (p.holidays) {
-    for (const year of [y, y + 1]) for (const [k, name] of finnishHolidays(year)) candidates.push([k, name]);
+  const official = officialHoliday(keyToTs(key));
+  if (on) {
+    p.excluded = p.excluded.filter(k => k !== key);
+    if (!(official && p.holidays) && !p.custom.includes(key)) p.custom.push(key);
+  } else {
+    p.custom = p.custom.filter(k => k !== key);
+    delete p.names[key];
+    if (official && !p.excluded.includes(key)) p.excluded.push(key);
   }
-  for (const k of p.custom) candidates.push([k, 'Your holiday']);
-  return candidates.filter(([k]) => k >= today).sort((a, b) => a[0].localeCompare(b[0]))[0];
+  save();
+}
+
+function nextPremiumHoliday() {
+  const today = startOfDay(Date.now());
+  for (let t = today, i = 0; i < 400; i++, t = addDays(t, 1)) {
+    const name = holidayName(t);
+    if (name) return [dayKey(t), name];
+  }
+  return null;
 }
 
 /* ================= model helpers ================= */
@@ -366,11 +389,136 @@ function renderEntries() {
     const reason = premiumReason(day);
     const label = dayLabel(day);
     const tag = reason && !(reason === 'Sunday' && label.startsWith('Sunday'))
-      ? ` <span class="pill">${esc(reason)}</span>` : '';
+      ? ` <span class="pill ${reason === 'Sunday' ? '' : 'red'}">${esc(reason)}</span>` : '';
     html += sectionTitle(esc(label) + tag, fmtHours(sum(list))) +
       `<div class="group">${list.map(entryRow).join('')}</div>`;
   }
   return { title: 'Entries', actions, html };
+}
+
+function fmtShortHours(ms) {
+  const h = ms / HOUR;
+  return `${h >= 10 ? Math.round(h) : Number(h.toFixed(1))}h`;
+}
+
+function renderCalendar() {
+  const a = new Date(calendar.anchor);
+  const first = new Date(a.getFullYear(), a.getMonth(), 1).getTime();
+  const next = new Date(a.getFullYear(), a.getMonth() + 1, 1).getTime();
+  const lead = (new Date(first).getDay() + 6) % 7; // weeks start on Monday
+  const gridStart = addDays(first, -lead);
+  const daysInMonth = new Date(a.getFullYear(), a.getMonth() + 1, 0).getDate();
+  const cells = Math.ceil((lead + daysInMonth) / 7) * 7;
+  const gridEnd = addDays(gridStart, cells);
+  const today = startOfDay(Date.now());
+
+  const perDay = new Map();
+  for (const e of entriesBetween(gridStart, gridEnd)) {
+    const k = startOfDay(e.start);
+    perDay.set(k, (perDay.get(k) || 0) + duration(e));
+  }
+
+  const weekdays = Array.from({ length: 7 }, (_, i) =>
+    `<span class="${i === 6 ? 'sun' : ''}">${new Date(addDays(gridStart, i)).toLocaleDateString([], { weekday: 'short' })}</span>`).join('');
+
+  let grid = '';
+  for (let i = 0, t = gridStart; i < cells; i++, t = addDays(t, 1)) {
+    const d = new Date(t);
+    const cls = [
+      t < first || t >= next ? 'out' : '',
+      t === today ? 'today' : '',
+      holidayName(t) ? 'holiday' : '',
+      d.getDay() === 0 ? 'sunday' : '',
+      officialHoliday(t) && !holidayName(t) ? 'excluded' : '',
+    ].join(' ');
+    const ms = perDay.get(t);
+    grid += `<button class="cal-day ${cls}" data-action="day" data-arg="${t}">
+      <span class="num">${d.getDate()}</span>${ms ? `<span class="hrs">${fmtShortHours(ms)}</span>` : '<span class="hrs"></span>'}
+    </button>`;
+  }
+
+  const monthWorked = sum(entriesBetween(first, next));
+  let html = `
+    <div class="period-nav">
+      ${actionBtn('cal-shift', icons.left, 'Previous month', 'data-arg="-1"')}
+      <b data-action="cal-today">${new Date(first).toLocaleDateString([], { month: 'long', year: 'numeric' })}</b>
+      ${actionBtn('cal-shift', icons.right, 'Next month', 'data-arg="1"')}
+    </div>
+    <div class="cal">
+      <div class="cal-week">${weekdays}</div>
+      <div class="cal-grid">${grid}</div>
+      <div class="cal-foot"><span><i class="key red"></i>Holiday / Sunday</span><span>${fmtHours(monthWorked)} worked</span></div>
+    </div>`;
+
+  // Holidays in this month: the ones that pay, plus built-in ones the user switched off.
+  const rows = [];
+  for (let t = first; t < next; t = addDays(t, 1)) {
+    const name = holidayName(t);
+    const official = officialHoliday(t);
+    if (name || official) rows.push({ t, name: name || official, off: !name });
+  }
+  html += sectionTitle('Holidays this month');
+  html += '<div class="group">' + (rows.length ? rows.map(r => `
+    <button class="row" data-action="day" data-arg="${r.t}">
+      <span class="hol-date ${r.off ? 'off' : ''}">${new Date(r.t).getDate()}</span>
+      <span class="grow">${esc(r.name)}<span class="sub block">${new Date(r.t).toLocaleDateString([], { weekday: 'long' })}${r.off ? ' · not paid extra' : ` · pays ${fmtFactor(premiumX())}`}</span></span>
+      ${icons.chev}
+    </button>`).join('') : '<div class="row sub">No holidays this month.</div>') + '</div>';
+  html += `<p class="hint">Tap a day to mark it as a holiday, switch a holiday off, or add hours on that day.</p>`;
+
+  return { title: 'Calendar', html };
+}
+
+function daySheet(ts) {
+  const key = dayKey(ts);
+  const p = state.settings.premium;
+  const official = officialHoliday(ts);
+  const name = holidayName(ts);
+  const isCustom = p.custom.includes(key);
+  const isSunday = new Date(ts).getDay() === 0;
+  const list = entriesBetween(ts, addDays(ts, 1)).sort((a, b) => a.start - b.start);
+
+  let explain;
+  if (name && isCustom) explain = `Your own holiday. Hours pay ${fmtFactor(premiumX())}.`;
+  else if (name) explain = `Finnish public holiday. Hours pay ${fmtFactor(premiumX())}.`;
+  else if (official) explain = `${official} is switched off, so hours pay normally${isSunday && p.sundays ? ' (Sunday pay still applies)' : ''}.`;
+  else if (isSunday && p.sundays) explain = `Sundays already pay ${fmtFactor(premiumX())}. Turn on to name this day as a holiday.`;
+  else explain = `Turn on if this day is a holiday. Hours will pay ${fmtFactor(premiumX())}.`;
+
+  const body = `
+    <div class="day-title ${name || isSunday ? 'red' : ''}">
+      ${new Date(ts).toLocaleDateString([], { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}
+      ${name || official ? `<span class="pill red ${name ? '' : 'off'}">${esc(name || official)}</span>` : ''}
+    </div>
+    <div class="group">
+      <label class="row field"><span class="grow">Holiday<span class="sub block">${esc(explain)}</span></span>
+        <input type="checkbox" class="switch" data-day-holiday ${name ? 'checked' : ''}></label>
+      ${isCustom ? `<label class="row field left"><input data-day-name placeholder="Name, e.g. Company day (optional)" value="${esc(p.names[key] || '')}" autocomplete="off"></label>` : ''}
+    </div>
+    ${sectionTitle('Hours', list.length ? fmtHours(sum(list)) : '')}
+    ${list.length ? `<div class="group">${list.map(entryRow).join('')}</div>` : ''}
+    <button type="button" class="btn plain ${list.length ? 'mt' : ''}" data-day-add>${icons.plus.replace('<svg', '<svg class="row-icon"')} Add hours on this day</button>`;
+
+  openSheet('', body, null);
+  const root = $('.sheet-body', sheet);
+
+  $('[data-day-holiday]', root).addEventListener('change', ev => {
+    setHoliday(key, ev.target.checked);
+    render();
+    daySheet(ts); // re-draw with the new state
+  });
+  const nameInput = $('[data-day-name]', root);
+  if (nameInput) nameInput.addEventListener('change', () => {
+    const v = nameInput.value.trim();
+    if (v) p.names[key] = v; else delete p.names[key];
+    save();
+    render();
+  });
+  $('[data-day-add]', root).addEventListener('click', () => { closeSheet(); entrySheet(null, ts); });
+  root.addEventListener('click', ev => {
+    const row = ev.target.closest('[data-action="edit-entry"]');
+    if (row) { closeSheet(); entrySheet(row.dataset.id); }
+  });
 }
 
 function periodRange(period, anchor) {
@@ -555,12 +703,16 @@ function renderJobs() {
   </div>`;
 
   html += sectionTitle('Your own holiday days') + '<div class="group">' +
-    [...p.custom].sort().map(k => `<div class="row"><span class="grow">${fmtDate(keyToTs(k))}</span>
+    [...p.custom].sort().map(k => `<div class="row"><span class="grow">${esc(p.names[k] || 'Holiday')}
+        <span class="sub block">${fmtDate(keyToTs(k))}</span></span>
       <button class="link danger" data-action="p-remove" data-arg="${k}">Remove</button></div>`).join('') +
+    [...p.excluded].sort().map(k => `<div class="row"><span class="grow"><s>${esc(officialHoliday(keyToTs(k)) || 'Holiday')}</s>
+        <span class="sub block">${fmtDate(keyToTs(k))} · switched off</span></span>
+      <button class="link" data-action="p-unexclude" data-arg="${k}">Restore</button></div>`).join('') +
     `<label class="row field"><span class="grow accent">Add a day</span><input type="date" data-change="p-add"></label>
   </div>
   <p class="hint">Hours on Sundays and holidays count ${fmtFactor(p.multiplier)} in paid hours and earnings.
-    You can change this for a single entry when you edit it.</p>`;
+    You can also tap any day in the Calendar, or change a single entry when you edit it.</p>`;
 
   html += sectionTitle('Settings') + `<div class="group">
     <label class="row field"><span>Currency</span>
@@ -587,7 +739,7 @@ function renderJobs() {
   return { title: 'Jobs', actions, html };
 }
 
-const renderers = { timer: renderTimer, entries: renderEntries, summary: renderSummary, jobs: renderJobs };
+const renderers = { timer: renderTimer, calendar: renderCalendar, entries: renderEntries, summary: renderSummary, jobs: renderJobs };
 
 function render() {
   if (!renderers[tab]) tab = 'timer';
@@ -619,22 +771,23 @@ function updateLive() {
 
 /* ================= sheets ================= */
 
+/** Bottom sheet. With onSave: Cancel/Save form. Without: a view with a Done button. */
 function openSheet(title, body, onSave) {
   sheet.innerHTML = `<form class="sheet-form" novalidate>
     <div class="sheet-head">
-      <button type="button" class="icon-btn" data-close>Cancel</button>
+      ${onSave ? '<button type="button" class="icon-btn" data-close>Cancel</button>' : '<span></span>'}
       <h2>${esc(title)}</h2>
-      <button type="submit" class="icon-btn bold">Save</button>
+      ${onSave ? '<button type="submit" class="icon-btn bold">Save</button>' : '<button type="button" class="icon-btn bold" data-close>Done</button>'}
     </div>
     <div class="sheet-body">${body}</div>
   </form>`;
   const form = $('form', sheet);
   form.addEventListener('submit', ev => {
     ev.preventDefault();
-    if (onSave(form) !== false) closeSheet();
+    if (onSave && onSave(form) !== false) closeSheet();
   });
   $('[data-close]', sheet).addEventListener('click', closeSheet);
-  sheet.showModal();
+  if (!sheet.open) sheet.showModal();
   return form;
 }
 function closeSheet() { if (sheet.open) sheet.close(); }
@@ -646,14 +799,15 @@ function showError(form, msg) {
   el.hidden = false;
 }
 
-function entrySheet(id) {
+/** Edit an entry, or add one (optionally on a given day, defaulting to 8:00–16:00). */
+function entrySheet(id, dayTs) {
   const entry = id ? state.entries.find(e => e.id === id) : null;
   if (!entry && !state.jobs.length) { jobSheet(null); return; }
 
   const now = Date.now();
   const isRunning = entry && entry.end == null;
-  const start = entry ? entry.start : now - 8 * HOUR;
-  const end = entry && entry.end != null ? entry.end : now;
+  const start = entry ? entry.start : dayTs != null ? dayTs + 8 * HOUR : now - 8 * HOUR;
+  const end = entry && entry.end != null ? entry.end : dayTs != null ? dayTs + 16 * HOUR : now;
   const selectedJob = entry ? entry.jobId : lastUsedJobId();
   const mode = (entry && entry.payMode) || 'auto';
   const payOpt = (value, label) => `<label><input type="radio" name="payMode" value="${value}" ${mode === value ? 'checked' : ''}><span>${label}</span></label>`;
@@ -862,11 +1016,15 @@ const actions = {
   period(_, arg) { summary.period = arg; summary.anchor = Date.now(); render(); },
   shift(_, arg) { summary.anchor = shiftAnchor(summary.period, summary.anchor, Number(arg)); render(); },
   'this-period'() { summary.anchor = Date.now(); render(); },
-  'p-remove'(_, key) {
-    state.settings.premium.custom = state.settings.premium.custom.filter(k => k !== key);
-    save();
+  day(_, ts) { daySheet(Number(ts)); },
+  'cal-shift'(_, n) {
+    const d = new Date(calendar.anchor);
+    calendar.anchor = new Date(d.getFullYear(), d.getMonth() + Number(n), 1).getTime();
     render();
   },
+  'cal-today'() { calendar.anchor = Date.now(); render(); },
+  'p-unexclude'(_, key) { setHoliday(key, true); render(); },
+  'p-remove'(_, key) { setHoliday(key, false); render(); },
   'export-period'() {
     const range = periodRange(summary.period, summary.anchor);
     shareFile(`work-hours-${summary.period}-${stamp()}.csv`, csvFor(entriesBetween(range.start, range.end)), 'text/csv');
@@ -893,8 +1051,8 @@ view.addEventListener('change', ev => {
     case 'p-holidays': p.holidays = t.checked; break;
     case 'p-mult': p.multiplier = Number(t.value); break;
     case 'p-add':
-      if (!t.value || p.custom.includes(t.value)) return;
-      p.custom.push(t.value);
+      if (!t.value || holidayName(keyToTs(t.value))) return;
+      setHoliday(t.value, true);
       break;
     case 'import':
       if (t.files[0]) importBackup(t.files[0]);
