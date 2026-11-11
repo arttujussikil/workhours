@@ -1,5 +1,6 @@
 // Offline support: serve the app from cache, refresh the cache in the background.
-const CACHE = 'workhours-v1';
+// Bump CACHE on every release so installed apps download the new version.
+const CACHE = 'workhours-v2';
 const ASSETS = [
   './',
   './index.html',
@@ -13,7 +14,12 @@ const ASSETS = [
 ];
 
 self.addEventListener('install', event => {
-  event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(ASSETS)).then(() => self.skipWaiting()));
+  // cache: 'reload' skips the HTTP cache so a new release never caches stale files.
+  event.waitUntil(
+    caches.open(CACHE)
+      .then(cache => cache.addAll(ASSETS.map(url => new Request(url, { cache: 'reload' }))))
+      .then(() => self.skipWaiting())
+  );
 });
 
 self.addEventListener('activate', event => {
