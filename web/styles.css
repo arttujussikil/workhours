@@ -199,6 +199,24 @@ button.row:disabled { opacity: 1; cursor: default; }
   margin-top: 2px;
 }
 .hero-sub { font-size: 15px; opacity: 0.88; margin-top: 4px; }
+.hero-foot { font-size: 14px; color: var(--muted); margin-top: 12px; padding-top: 12px; border-top: 0.5px solid var(--sep); }
+.hero-foot b { color: var(--text); }
+
+/* ---------- driving ---------- */
+a.row { text-decoration: none; }
+.date-badge {
+  flex: none; width: 40px; text-align: center; line-height: 1.1;
+  display: flex; flex-direction: column; align-items: center;
+}
+.date-badge b { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.date-badge span { font-size: 11px; color: var(--muted); text-transform: uppercase; font-weight: 600; }
+.plus-badge {
+  flex: none; width: 30px; height: 30px; border-radius: 50%;
+  background: var(--accent); color: #fff;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.plus-badge svg { width: 18px; height: 18px; }
+
 .btn.stop { margin-top: 18px; background: rgba(255, 255, 255, 0.96); color: #d70015; }
 
 .mini-bars { display: flex; gap: 8px; height: 88px; margin-top: 16px; }

@@ -44,7 +44,17 @@ function normalize(s) {
   if (!Array.isArray(premium.custom)) premium.custom = [];
   if (!Array.isArray(premium.excluded)) premium.excluded = [];
   if (!premium.names || typeof premium.names !== 'object') premium.names = {};
-  return { jobs: s.jobs, entries: s.entries, settings: { currency: set.currency || 'EUR', premium } };
+  // Driving: places to pick as start/end points, and trips between them.
+  const places = Array.isArray(s.places) ? s.places : defaultPlaces();
+  const trips = Array.isArray(s.trips) ? s.trips : [];
+  const kmRate = typeof set.kmRate === 'number' ? set.kmRate : 0;
+  return { jobs: s.jobs, entries: s.entries, places, trips, settings: { currency: set.currency || 'EUR', premium, kmRate } };
+}
+function defaultPlaces() {
+  return [
+    { id: uid(), name: 'Karhunpolku 1', address: '' },
+    { id: uid(), name: 'Vuokatti Bowling', address: 'Vuokatti Bowling, Sotkamo' },
+  ];
 }
 function isValidData(s) {
   return s && Array.isArray(s.jobs) && Array.isArray(s.entries) &&
@@ -55,8 +65,10 @@ function save() {
   catch (err) { alert('Could not save your data: ' + err.message); }
 }
 
-const uid = () => (crypto.randomUUID ? crypto.randomUUID()
-  : Date.now().toString(36) + Math.random().toString(36).slice(2));
+// A function declaration (not const) so loadState() can use it before this line runs.
+function uid() {
+  return crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2);
+}
 
 /* ================= dates & holidays ================= */
 
@@ -201,6 +213,41 @@ function lastUsedJobId() {
   return latest && jobById(latest.jobId) ? latest.jobId : state.jobs[0]?.id;
 }
 
+/* ---------- driving ---------- */
+
+const placeById = id => state.places.find(p => p.id === id);
+const placeName = id => (placeById(id) ? placeById(id).name : 'Unknown place');
+const tripKm = t => (Number(t.km) || 0) * (t.round ? 2 : 1);
+const tripMoney = t => tripKm(t) * state.settings.kmRate;
+const sumKm = list => list.reduce((acc, t) => acc + tripKm(t), 0);
+const tripsBetween = (start, end) => state.trips.filter(t => t.date >= start && t.date < end);
+
+/** One-way distance from the latest trip between these two places, in either direction. */
+function knownDistance(from, to) {
+  const t = [...state.trips].sort((a, b) => b.date - a.date)
+    .find(t => (t.from === from && t.to === to) || (t.from === to && t.to === from));
+  return t ? t.km : null;
+}
+
+/** Routes driven most often, for one-tap adding. */
+function frequentRoutes(limit = 3) {
+  const map = new Map();
+  for (const t of [...state.trips].sort((a, b) => b.date - a.date)) {
+    if (!placeById(t.from) || !placeById(t.to)) continue;
+    const key = `${t.from}|${t.to}|${t.round ? 1 : 0}`;
+    const cur = map.get(key) || { from: t.from, to: t.to, round: !!t.round, km: t.km, jobId: t.jobId, count: 0 };
+    cur.count++;
+    map.set(key, cur);
+  }
+  return [...map.values()].sort((a, b) => b.count - a.count).slice(0, limit);
+}
+
+function mapsUrl(from, to) {
+  const q = p => encodeURIComponent((p && (p.address || p.name)) || '');
+  return `https://maps.apple.com/?saddr=${q(placeById(from))}&daddr=${q(placeById(to))}&dirflg=d`;
+}
+const parseNum = v => parseFloat(String(v).replace(',', '.'));
+
 /* ================= formatting ================= */
 
 function fmtHours(ms) {
@@ -222,7 +269,8 @@ function fmtMoney(v) {
   }
   return moneyFormatter.format(v);
 }
-const fmtFactor = f => `${Number(f.toFixed(2))}×`;
+const fmtKm = km => `${km.toLocaleString(undefined, { maximumFractionDigits: 1 })} km`;
+const fmtFactor = f =>`${Number(f.toFixed(2))}×`;
 const fmtTime = ts => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 const fmtDate = ts => new Date(ts).toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' });
 
@@ -664,6 +712,16 @@ function renderSummary() {
     }).join('') + '</div>';
   }
 
+  const trips = tripsBetween(range.start, range.end);
+  if (trips.length) {
+    const km = sumKm(trips);
+    html += sectionTitle('Driving') + `<div class="group"><button class="row" data-action="go-driving">
+      <span class="grow">${trips.length} ${trips.length === 1 ? 'trip' : 'trips'}</span>
+      <span class="right"><span class="block">${fmtKm(km)}</span>
+        ${state.settings.kmRate ? `<span class="sub block">${fmtMoney(km * state.settings.kmRate)}</span>` : ''}</span>
+      ${icons.chev}</button></div>`;
+  }
+
   const actions = actionBtn('export-period', icons.share, 'Export CSV', list.length ? '' : 'disabled');
   return { title: 'Summary', actions, html };
 }
@@ -739,7 +797,94 @@ function renderJobs() {
   return { title: 'Jobs', actions, html };
 }
 
-const renderers = { timer: renderTimer, calendar: renderCalendar, entries: renderEntries, summary: renderSummary, jobs: renderJobs };
+function tripRow(t) {
+  const job = t.jobId ? jobById(t.jobId) : null;
+  const d = new Date(t.date);
+  const sub = [t.round ? 'Round trip' : 'One way', job ? esc(job.name) : '', t.note ? esc(t.note) : ''].filter(Boolean).join(' · ');
+  return `<button class="row" data-action="edit-trip" data-id="${t.id}">
+    <span class="date-badge"><b>${d.getDate()}</b><span>${d.toLocaleDateString([], { weekday: 'short' })}</span></span>
+    <span class="grow">
+      <span class="block clamp">${esc(placeName(t.from))} ${t.round ? '⇄' : '→'} ${esc(placeName(t.to))}</span>
+      <span class="sub block clamp">${sub}</span>
+    </span>
+    <span class="right">
+      <span class="block">${fmtKm(tripKm(t))}</span>
+      ${state.settings.kmRate ? `<span class="sub block">${fmtMoney(tripMoney(t))}</span>` : ''}
+    </span>
+  </button>`;
+}
+
+let quickRoutes = [];
+
+function renderDriving() {
+  const actions = actionBtn('export-trips', icons.share, 'Export trips', state.trips.length ? '' : 'disabled') +
+    actionBtn('add-trip', icons.plus, 'Add trip');
+  const now = Date.now();
+  const rate = state.settings.kmRate;
+  const month = periodRange('month', now);
+  const year = periodRange('year', now);
+  const monthKm = sumKm(tripsBetween(month.start, month.end));
+  const yearKm = sumKm(tripsBetween(year.start, year.end));
+
+  let html = `<section class="hero idle">
+    <div class="hero-top">${new Date(now).toLocaleDateString([], { month: 'long' })}</div>
+    <div class="hero-stats">
+      <div><b>${fmtKm(monthKm)}</b><span>driven</span></div>
+      ${rate ? `<div><b>${fmtMoney(monthKm * rate)}</b><span>allowance</span></div>` : ''}
+    </div>
+    <div class="hero-foot">${new Date(now).getFullYear()} so far: <b>${fmtKm(yearKm)}</b>${rate ? ` · ${fmtMoney(yearKm * rate)}` : ''}</div>
+  </section>`;
+
+  quickRoutes = frequentRoutes();
+  if (!quickRoutes.length && state.places.length >= 2) {
+    quickRoutes = [{ from: state.places[0].id, to: state.places[1].id, round: true, km: null }];
+  }
+  if (quickRoutes.length) {
+    html += sectionTitle('Add a trip today') + '<div class="group">' + quickRoutes.map((r, i) => `
+      <button class="row" data-action="quick-trip" data-arg="${i}">
+        <span class="grow">
+          <span class="block clamp">${esc(placeName(r.from))} ${r.round ? '⇄' : '→'} ${esc(placeName(r.to))}</span>
+          <span class="sub block">${r.round ? 'Round trip' : 'One way'}${r.km ? ` · ${fmtKm(r.km * (r.round ? 2 : 1))}` : ''}</span>
+        </span>
+        <span class="plus-badge">${icons.plus}</span>
+      </button>`).join('') + '</div>';
+  }
+
+  if (!state.trips.length) {
+    html += `<p class="hint">Tap a route above, or + at the top, to log a drive. Pick the start and end point, and the app
+      remembers the distance for next time.</p>`;
+  } else {
+    const groups = new Map();
+    for (const t of [...state.trips].sort((a, b) => b.date - a.date)) {
+      const d = new Date(t.date);
+      const key = new Date(d.getFullYear(), d.getMonth(), 1).getTime();
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(t);
+    }
+    for (const [key, list] of groups) {
+      const label = new Date(key).toLocaleDateString([], { month: 'long', year: 'numeric' });
+      html += sectionTitle(esc(label), fmtKm(sumKm(list))) + `<div class="group">${list.map(tripRow).join('')}</div>`;
+    }
+  }
+
+  html += sectionTitle('Places') + '<div class="group">' + state.places.map(p => `
+    <button class="row" data-action="edit-place" data-id="${p.id}">
+      <span class="grow">${esc(p.name)}${p.address ? `<span class="sub block clamp">${esc(p.address)}</span>` : ''}</span>
+      ${icons.chev}
+    </button>`).join('') +
+    `<button class="row accent" data-action="add-place">${icons.plus.replace('<svg', '<svg class="row-icon"')} Add place</button></div>`;
+
+  html += sectionTitle('Kilometre allowance') + `<div class="group">
+    <label class="row field"><span>Per km</span>
+      <input data-change="km-rate" inputmode="decimal" placeholder="not set" value="${rate || ''}"></label>
+  </div>
+  <p class="hint">Kilometrikorvaus: enter the rate you get paid per km (vero.fi lists this year's tax-free rate).
+    Leave it empty to track kilometres only.</p>`;
+
+  return { title: 'Driving', actions, html };
+}
+
+const renderers = { timer: renderTimer, calendar: renderCalendar, entries: renderEntries, summary: renderSummary, driving: renderDriving, jobs: renderJobs };
 
 function render() {
   if (!renderers[tab]) tab = 'timer';
@@ -945,6 +1090,157 @@ function jobSheet(id) {
   });
 }
 
+/** Add or edit a drive. preset pre-fills a new trip (e.g. from a frequent route). */
+function tripSheet(id, preset = {}) {
+  const trip = id ? state.trips.find(t => t.id === id) : null;
+  const base = trip || {
+    date: startOfDay(Date.now()), from: state.places[0]?.id, to: state.places[1]?.id,
+    km: null, round: false, jobId: lastUsedJobId() || '', note: '', ...preset,
+  };
+  if (base.km == null) base.km = knownDistance(base.from, base.to);
+
+  const placeOptions = sel => state.places.map(p =>
+    `<option value="${p.id}" ${p.id === sel ? 'selected' : ''}>${esc(p.name)}</option>`).join('') +
+    '<option value="__new">New place…</option>';
+
+  const body = `
+    <div class="group">
+      <label class="row field"><span>Date</span><input type="date" name="date" value="${dayKey(base.date)}"></label>
+    </div>
+    <div class="group mt">
+      <label class="row field"><span>From</span><select name="from">${placeOptions(base.from)}</select></label>
+      <label class="row field"><span>To</span><select name="to">${placeOptions(base.to)}</select></label>
+      <button type="button" class="row accent" data-swap>${icons.swap.replace('<svg', '<svg class="row-icon"')} Swap start and end</button>
+    </div>
+    <div class="group mt">
+      <label class="row field"><span>Distance (km, one way)</span>
+        <input name="km" inputmode="decimal" placeholder="km" value="${base.km ?? ''}"></label>
+      <label class="row field"><span class="grow">Round trip<span class="sub block">There and back, counts the distance twice</span></span>
+        <input type="checkbox" class="switch" name="round" ${base.round ? 'checked' : ''}></label>
+      <a class="row accent" data-maps target="_blank" rel="noopener">Check the distance in Maps</a>
+    </div>
+    <div class="group mt">
+      <label class="row field"><span>Job</span>
+        <select name="job"><option value="">None</option>${state.jobs.map(j =>
+          `<option value="${j.id}" ${j.id === base.jobId ? 'selected' : ''}>${esc(j.name)}</option>`).join('')}</select></label>
+      <label class="row field"><textarea name="note" rows="2" placeholder="Note (optional)">${esc(base.note || '')}</textarea></label>
+    </div>
+    <div class="group mt"><div class="row"><span class="grow">Total</span><span class="right" data-total></span></div></div>
+    <p class="error" data-error hidden></p>
+    ${trip ? '<button type="button" class="btn plain danger-text mt" data-delete>Delete Trip</button>' : ''}`;
+
+  const readForm = f => {
+    const el = f.elements;
+    return {
+      date: el.date.value ? keyToTs(el.date.value) : NaN,
+      from: el.from.value, to: el.to.value,
+      km: parseNum(el.km.value),
+      round: el.round.checked,
+      jobId: el.job.value,
+      note: el.note.value.trim(),
+    };
+  };
+
+  const form = openSheet(trip ? 'Edit Trip' : 'Add Trip', body, f => {
+    const data = readForm(f);
+    if (Number.isNaN(data.date)) return showError(f, 'Please choose a date.'), false;
+    if (data.from === data.to) return showError(f, 'Start and end must be different places.'), false;
+    if (!(data.km > 0)) return showError(f, 'Enter the distance in kilometres.'), false;
+    if (trip) Object.assign(trip, data);
+    else state.trips.push({ id: uid(), ...data });
+    save();
+    render();
+  });
+  const el = form.elements;
+
+  const fillSelects = () => {
+    const from = el.from.value, to = el.to.value;
+    el.from.innerHTML = placeOptions(from);
+    el.to.innerHTML = placeOptions(to);
+  };
+  const routeChanged = () => {
+    const km = knownDistance(el.from.value, el.to.value);
+    if (km != null) el.km.value = km;
+  };
+  const update = () => {
+    const d = readForm(form);
+    $('[data-maps]', form).href = mapsUrl(d.from, d.to);
+    const total = d.km > 0 ? d.km * (d.round ? 2 : 1) : 0;
+    $('[data-total]', form).textContent = total
+      ? fmtKm(total) + (state.settings.kmRate ? ` · ${fmtMoney(total * state.settings.kmRate)}` : '') : '–';
+  };
+
+  for (const name of ['from', 'to']) {
+    const select = el[name];
+    select.dataset.prev = select.value;
+    select.addEventListener('change', () => {
+      if (select.value === '__new') {
+        const n = (prompt('Name or address of the new place') || '').trim();
+        if (!n) { select.value = select.dataset.prev; return; }
+        const place = { id: uid(), name: n, address: '' };
+        state.places.push(place);
+        save();
+        fillSelects();
+        select.value = place.id;
+      }
+      select.dataset.prev = select.value;
+      routeChanged();
+      update();
+    });
+  }
+  $('[data-swap]', form).addEventListener('click', () => {
+    [el.from.value, el.to.value] = [el.to.value, el.from.value];
+    el.from.dataset.prev = el.from.value;
+    el.to.dataset.prev = el.to.value;
+    update();
+  });
+  form.addEventListener('input', update);
+  update();
+
+  const del = $('[data-delete]', form);
+  if (del) del.addEventListener('click', () => {
+    if (!confirm('Delete this trip?')) return;
+    state.trips = state.trips.filter(t => t.id !== trip.id);
+    save();
+    closeSheet();
+    render();
+  });
+}
+
+function placeSheet(id) {
+  const place = id ? placeById(id) : null;
+  const body = `
+    <div class="group">
+      <label class="row field left"><input name="name" placeholder="Name, e.g. Home" value="${esc(place ? place.name : '')}" autocomplete="off"></label>
+      <label class="row field left"><input name="address" placeholder="Address for Maps (optional)" value="${esc(place ? place.address || '' : '')}" autocomplete="off"></label>
+    </div>
+    <p class="hint">The address is only used for the "Check the distance in Maps" link. Add the town if Maps finds the wrong place.</p>
+    <p class="error" data-error hidden></p>
+    ${place ? '<button type="button" class="btn plain danger-text mt" data-delete>Delete Place</button>' : ''}`;
+
+  const form = openSheet(place ? 'Edit Place' : 'New Place', body, f => {
+    const name = f.elements.name.value.trim();
+    if (!name) return showError(f, 'Give the place a name.'), false;
+    const data = { name, address: f.elements.address.value.trim() };
+    if (place) Object.assign(place, data);
+    else state.places.push({ id: uid(), ...data });
+    save();
+    render();
+  });
+  if (!place) setTimeout(() => form.elements.name.focus(), 50);
+
+  const del = $('[data-delete]', form);
+  if (del) del.addEventListener('click', () => {
+    const used = state.trips.filter(t => t.from === place.id || t.to === place.id).length;
+    if (used) { alert(`"${place.name}" is used in ${used} ${used === 1 ? 'trip' : 'trips'}, so it can't be deleted. You can rename it instead.`); return; }
+    if (!confirm(`Delete "${place.name}"?`)) return;
+    state.places = state.places.filter(p => p.id !== place.id);
+    save();
+    closeSheet();
+    render();
+  });
+}
+
 /* ================= export / import ================= */
 
 function csvFor(list) {
@@ -956,6 +1252,18 @@ function csvFor(list) {
       dayKey(e.start), q(jobName(jobById(e.jobId))), time(e.start), e.end == null ? '' : time(e.end),
       e.breakMin || 0, (duration(e) / HOUR).toFixed(2), payFactor(e).toFixed(2), (paidMs(e) / HOUR).toFixed(2),
       earnings(e).toFixed(2), q(e.note || ''),
+    ].join(','));
+  }
+  return rows.join('\n');
+}
+
+function tripsCsv(list) {
+  const q = s => `"${String(s).replace(/"/g, '""')}"`;
+  const rows = [['Date', 'From', 'To', 'Km one way', 'Round trip', 'Km', 'Allowance', 'Job', 'Note'].join(',')];
+  for (const t of [...list].sort((a, b) => a.date - b.date)) {
+    rows.push([
+      dayKey(t.date), q(placeName(t.from)), q(placeName(t.to)), t.km, t.round ? 'yes' : 'no',
+      tripKm(t).toFixed(1), tripMoney(t).toFixed(2), q(t.jobId && jobById(t.jobId) ? jobById(t.jobId).name : ''), q(t.note || ''),
     ].join(','));
   }
   return rows.join('\n');
@@ -985,7 +1293,7 @@ function importBackup(file) {
     let data;
     try { data = JSON.parse(reader.result); } catch { data = null; }
     if (!isValidData(data)) { alert("That file isn't a Work Hours backup."); return; }
-    const msg = `Replace everything on this phone with the backup (${data.jobs.length} jobs, ${data.entries.length} entries)?`;
+    const msg = `Replace everything on this phone with the backup (${data.jobs.length} jobs, ${data.entries.length} entries${Array.isArray(data.trips) ? `, ${data.trips.length} trips` : ''})?`;
     if (!confirm(msg)) return;
     state = normalize(data);
     save();
@@ -1029,6 +1337,16 @@ const actions = {
     const range = periodRange(summary.period, summary.anchor);
     shareFile(`work-hours-${summary.period}-${stamp()}.csv`, csvFor(entriesBetween(range.start, range.end)), 'text/csv');
   },
+  'add-trip': () => tripSheet(null),
+  'edit-trip': id => tripSheet(id),
+  'quick-trip'(_, i) {
+    const r = quickRoutes[Number(i)];
+    if (r) tripSheet(null, { from: r.from, to: r.to, round: r.round, km: r.km, ...(r.jobId !== undefined ? { jobId: r.jobId } : {}) });
+  },
+  'go-driving'() { tab = 'driving'; writePref(TAB_KEY, tab); render(); window.scrollTo(0, 0); },
+  'add-place': () => placeSheet(null),
+  'edit-place': id => placeSheet(id),
+  'export-trips': () => shareFile(`driving-${stamp()}.csv`, tripsCsv(state.trips), 'text/csv'),
   'export-all': () => shareFile(`work-hours-all-${stamp()}.csv`, csvFor(state.entries), 'text/csv'),
   'export-backup': () => shareFile(`work-hours-backup-${stamp()}.json`, JSON.stringify(state, null, 1), 'application/json'),
 };
@@ -1050,6 +1368,11 @@ view.addEventListener('change', ev => {
     case 'p-sundays': p.sundays = t.checked; break;
     case 'p-holidays': p.holidays = t.checked; break;
     case 'p-mult': p.multiplier = Number(t.value); break;
+    case 'km-rate': {
+      const v = parseNum(t.value);
+      state.settings.kmRate = v > 0 && v < 100 ? v : 0;
+      break;
+    }
     case 'p-add':
       if (!t.value || holidayName(keyToTs(t.value))) return;
       setHoliday(t.value, true);
