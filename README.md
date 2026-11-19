@@ -13,7 +13,7 @@ The app lives in `web/`: plain HTML/CSS/JS with no dependencies, hosted on GitHu
 - **Timer**: tap a job to start the clock and tap Stop when you're done. Tapping another job switches to it. Shows a live clock, earnings so far, and today's total.
 - **Calendar**: month view with Finnish holidays and Sundays in red and the hours worked on each day. Tap a day to add, name or switch off a holiday.
 - **Sunday & holiday pay**: hours on Sundays and holidays count double (or another multiplier you pick).
-- **Driving**: log drives by picking a start and end place (one way or round trip). The distance is remembered per route, and an optional per-km rate (kilometrikorvaus) shows the allowance. Exports as CSV.
+- **Driving**: log drives by picking a start and end place (one way or round trip). The distance is remembered per route. A job can have its drive set (Jobs → job → Driving), and then a trip is added automatically for every day with hours on that job. An an optional per-km rate (kilometrikorvaus) shows the allowance. Exports as CSV.
 - **Entries**: every work session grouped by day, with daily totals. Tap one to edit its start, end, break or note, or add hours you forgot to time.
 - **Summary**: hours and earnings per week, month or year, with a stacked bar chart and per-job totals. The share button exports the period as CSV.
 - **Jobs**: name, optional hourly rate and color. Also has the currency setting and backup/restore.
