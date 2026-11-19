@@ -48,7 +48,10 @@ function normalize(s) {
   const places = Array.isArray(s.places) ? s.places : defaultPlaces();
   const trips = Array.isArray(s.trips) ? s.trips : [];
   const kmRate = typeof set.kmRate === 'number' ? set.kmRate : 0;
-  return { jobs: s.jobs, entries: s.entries, places, trips, settings: { currency: set.currency || 'EUR', premium, kmRate } };
+  return {
+    jobs: s.jobs, entries: s.entries, places, trips,
+    settings: { currency: set.currency || 'EUR', premium, kmRate, commuteSetup: !!set.commuteSetup },
+  };
 }
 function defaultPlaces() {
   return [
@@ -61,6 +64,8 @@ function isValidData(s) {
     s.entries.every(e => typeof e.start === 'number');
 }
 function save() {
+  setupBowlingCommute();
+  syncAutoTrips();
   try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); }
   catch (err) { alert('Could not save your data: ' + err.message); }
 }
@@ -240,6 +245,60 @@ function frequentRoutes(limit = 3) {
     map.set(key, cur);
   }
   return [...map.values()].sort((a, b) => b.count - a.count).slice(0, limit);
+}
+
+/*
+ * Jobs with a commute (job.commute = {from, to, km, round, skip}) get one trip per day they're worked.
+ * Those trips carry auto: 'jobId|YYYY-MM-DD'. They're removed when that day no longer has hours on
+ * the job, follow later changes to the job's route unless edited by hand, and a deleted one is
+ * remembered in commute.skip so it doesn't come back.
+ */
+function syncAutoTrips() {
+  const worked = new Map();
+  for (const e of state.entries) {
+    const job = jobById(e.jobId);
+    if (job) worked.set(`${job.id}|${dayKey(e.start)}`, job);
+  }
+  let changed = false;
+  const before = state.trips.length;
+  state.trips = state.trips.filter(t => !t.auto || worked.has(t.auto));
+  if (state.trips.length !== before) changed = true;
+
+  const have = new Set(state.trips.filter(t => t.auto).map(t => t.auto));
+  for (const [key, job] of worked) {
+    const c = job.commute;
+    const day = key.slice(key.indexOf('|') + 1);
+    if (!c || !(c.km > 0) || have.has(key) || (c.skip || []).includes(day)) continue;
+    state.trips.push({ id: uid(), auto: key, date: keyToTs(day), from: c.from, to: c.to, km: c.km, round: !!c.round, jobId: job.id, note: '' });
+    changed = true;
+  }
+  for (const t of state.trips) {
+    if (!t.auto || t.edited) continue;
+    const c = jobById(t.jobId)?.commute;
+    if (c && c.km > 0 && (t.from !== c.from || t.to !== c.to || t.km !== c.km || t.round !== !!c.round)) {
+      Object.assign(t, { from: c.from, to: c.to, km: c.km, round: !!c.round });
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+/** One-time setup: the bowling job's drive from Home (33.6 km each way, there and back). */
+function setupBowlingCommute() {
+  if (state.settings.commuteSetup) return false;
+  const job = state.jobs.find(j => /bowling|vuokatti/i.test(j.name));
+  if (!job) return false;
+  state.settings.commuteSetup = true;
+  if (job.commute) return true;
+  const place = (name, address) => {
+    let p = state.places.find(p => p.name.toLowerCase() === name.toLowerCase());
+    if (!p) state.places.push(p = { id: uid(), name, address });
+    return p;
+  };
+  const home = place('Home', '');
+  const work = place('Vuokatti Bowling', 'Vuokatti Bowling, Sotkamo');
+  job.commute = { from: home.id, to: work.id, km: 33.6, round: true, skip: [] };
+  return true;
 }
 
 function mapsUrl(from, to) {
@@ -740,7 +799,8 @@ function renderJobs() {
       return `<button class="row" data-action="edit-job" data-id="${j.id}">
         <span class="avatar" style="--c:${j.color}">${esc(initial(j.name))}</span>
         <span class="grow">${esc(j.name)}
-          ${j.rate ? `<span class="sub block">${fmtMoney(j.rate)} / h</span>` : ''}
+          ${j.rate || j.commute ? `<span class="sub block">${[j.rate ? `${fmtMoney(j.rate)} / h` : '',
+            j.commute ? `${fmtKm(j.commute.km * (j.commute.round ? 2 : 1))} drive per day` : ''].filter(Boolean).join(' · ')}</span>` : ''}
         </span>
         <span class="sub right">${fmtHours(total)}</span>
         ${icons.chev}
@@ -1047,6 +1107,13 @@ function entrySheet(id, dayTs) {
 function jobSheet(id) {
   const job = id ? jobById(id) : null;
   const color = job ? job.color : PALETTE[state.jobs.length % PALETTE.length];
+  const commute = job && job.commute;
+  const cDefault = commute || {
+    from: state.places[0]?.id, to: state.places[1]?.id,
+    km: knownDistance(state.places[0]?.id, state.places[1]?.id), round: true,
+  };
+  const placeOpts = sel => state.places.map(p =>
+    `<option value="${p.id}" ${p.id === sel ? 'selected' : ''}>${esc(p.name)}</option>`).join('');
   const body = `
     <div class="group">
       <label class="row field left"><input name="name" placeholder="Job name" value="${esc(job ? job.name : '')}" autocomplete="off"></label>
@@ -1059,6 +1126,18 @@ function jobSheet(id) {
     <div class="group swatches">${PALETTE.map(c => `<label>
       <input type="radio" name="color" value="${c}" ${c === color ? 'checked' : ''}><span style="background:${c}"></span></label>`).join('')}
     </div>
+    <div class="section-title"><span>Driving</span></div>
+    <div class="group">
+      <label class="row field"><span class="grow">Count kilometres<span class="sub block">Adds the drive for every day you have hours here</span></span>
+        <input type="checkbox" class="switch" name="cOn" ${commute ? 'checked' : ''}></label>
+      <label class="row field" data-commute><span>From</span><select name="cFrom">${placeOpts(cDefault.from)}</select></label>
+      <label class="row field" data-commute><span>To</span><select name="cTo">${placeOpts(cDefault.to)}</select></label>
+      <label class="row field" data-commute><span>Distance (km, one way)</span>
+        <input name="cKm" inputmode="decimal" placeholder="km" value="${cDefault.km ?? ''}"></label>
+      <label class="row field" data-commute><span class="grow">Round trip<span class="sub block">There and back, counts the distance twice</span></span>
+        <input type="checkbox" class="switch" name="cRound" ${cDefault.round ? 'checked' : ''}></label>
+    </div>
+    <p class="hint" data-commute>Add more places in the Driving tab.</p>
     <p class="error" data-error hidden></p>
     ${job ? '<button type="button" class="btn plain danger-text mt" data-delete>Delete Job</button>' : ''}`;
 
@@ -1067,7 +1146,14 @@ function jobSheet(id) {
     const name = el.name.value.trim();
     if (!name) return showError(f, 'Give the job a name.'), false;
     const rate = Math.max(0, parseFloat(el.rate.value.replace(',', '.')) || 0);
-    const data = { name, rate, color: el.color.value };
+    const data = { name, rate, color: el.color.value, commute: null };
+    if (el.cOn.checked) {
+      const km = parseNum(el.cKm.value);
+      if (!state.places.length || el.cFrom.value === el.cTo.value) return showError(f, 'Pick two different places for the drive.'), false;
+      if (!(km > 0)) return showError(f, 'Enter the driving distance in kilometres.'), false;
+      data.commute = { from: el.cFrom.value, to: el.cTo.value, km, round: el.cRound.checked, skip: (commute && commute.skip) || [] };
+    }
+    state.settings.commuteSetup = true; // the user has chosen, don't apply the one-time setup over it
     if (job) Object.assign(job, data);
     else state.jobs.push({ id: uid(), createdAt: Date.now(), ...data });
     save();
@@ -1075,9 +1161,19 @@ function jobSheet(id) {
   });
   if (!job) setTimeout(() => form.elements.name.focus(), 50);
 
+  const showCommute = () => form.querySelectorAll('[data-commute]').forEach(r => { r.hidden = !form.elements.cOn.checked; });
+  form.elements.cOn.addEventListener('change', showCommute);
+  showCommute();
+  const fillKm = () => {
+    const km = knownDistance(form.elements.cFrom.value, form.elements.cTo.value);
+    if (km != null) form.elements.cKm.value = km;
+  };
+  form.elements.cFrom.addEventListener('change', fillKm);
+  form.elements.cTo.addEventListener('change', fillKm);
+
   const del = $('[data-delete]', form);
   if (del) del.addEventListener('click', () => {
-    const count = state.entries.filter(e => e.jobId === job.id).length;
+    const count =state.entries.filter(e => e.jobId === job.id).length;
     const msg = count
       ? `Delete "${job.name}" and its ${count} ${count === 1 ? 'entry' : 'entries'}? This can't be undone.`
       : `Delete "${job.name}"?`;
@@ -1126,6 +1222,8 @@ function tripSheet(id, preset = {}) {
       <label class="row field"><textarea name="note" rows="2" placeholder="Note (optional)">${esc(base.note || '')}</textarea></label>
     </div>
     <div class="group mt"><div class="row"><span class="grow">Total</span><span class="right" data-total></span></div></div>
+    ${trip && trip.auto ? `<p class="hint">Added automatically because you have hours on ${esc(jobName(jobById(trip.jobId)))} this day.
+      If you didn't drive, delete it and it won't come back.</p>` : ''}
     <p class="error" data-error hidden></p>
     ${trip ? '<button type="button" class="btn plain danger-text mt" data-delete>Delete Trip</button>' : ''}`;
 
@@ -1146,7 +1244,7 @@ function tripSheet(id, preset = {}) {
     if (Number.isNaN(data.date)) return showError(f, 'Please choose a date.'), false;
     if (data.from === data.to) return showError(f, 'Start and end must be different places.'), false;
     if (!(data.km > 0)) return showError(f, 'Enter the distance in kilometres.'), false;
-    if (trip) Object.assign(trip, data);
+    if (trip) Object.assign(trip, data, trip.auto ? { edited: true } : {});
     else state.trips.push({ id: uid(), ...data });
     save();
     render();
@@ -1200,6 +1298,11 @@ function tripSheet(id, preset = {}) {
   const del = $('[data-delete]', form);
   if (del) del.addEventListener('click', () => {
     if (!confirm('Delete this trip?')) return;
+    if (trip.auto) {
+      // Remember it, so the automatic trip isn't added again for this day.
+      const c = jobById(trip.auto.split('|')[0])?.commute;
+      if (c) c.skip = [...(c.skip || []), trip.auto.split('|')[1]];
+    }
     state.trips = state.trips.filter(t => t.id !== trip.id);
     save();
     closeSheet();
@@ -1401,6 +1504,7 @@ document.addEventListener('visibilitychange', () => {
 });
 
 setInterval(updateLive, 1000);
+if (setupBowlingCommute() | syncAutoTrips()) save();
 render();
 
 /* Ask the browser not to evict our data, and cache the app for offline use. */
