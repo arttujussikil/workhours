@@ -216,6 +216,10 @@ a.row { text-decoration: none; }
   display: inline-flex; align-items: center; justify-content: center;
 }
 .plus-badge svg { width: 18px; height: 18px; }
+.search-row { gap: 10px; color: var(--muted); }
+.search-row input { color: var(--text); }
+.search-row input::-webkit-search-cancel-button { display: none; }
+.pin { flex: none; font-size: 18px; }
 
 .btn.stop { margin-top: 18px; background: rgba(255, 255, 255, 0.96); color: #d70015; }
 

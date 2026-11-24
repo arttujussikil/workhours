@@ -278,7 +278,9 @@ function syncAutoTrips() {
 
 
 function mapsUrl(from, to) {
-  const q = p => encodeURIComponent((p && (p.address || p.name)) || '');
+  // The exact map point when the place was picked from search, otherwise its address or name.
+  const q = p => (p && typeof p.lat === 'number' ? `${p.lat},${p.lon}`
+    : encodeURIComponent((p && (p.address || p.name)) || ''));
   return `https://maps.apple.com/?saddr=${q(placeById(from))}&daddr=${q(placeById(to))}&dirflg=d`;
 }
 const parseNum = v => parseFloat(String(v).replace(',', '.'));
@@ -340,6 +342,7 @@ function shade(hex, amt) {
 /* ================= small UI pieces ================= */
 
 const icons = {
+  search: '<svg class="row-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M15.5 15.5L20 20"/></svg>',
   plus: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>',
   share: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M8 7l4-4 4 4M6 11H5a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-8a1 1 0 0 0-1-1h-1"/></svg>',
   left: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 5l-7 7 7 7"/></svg>',
@@ -1173,7 +1176,7 @@ function tripSheet(id, preset = {}) {
     placeSheet(null);
     return;
   }
-  const base = trip || {
+  const base = trip ? { ...trip, ...preset } : {
     date: startOfDay(Date.now()), from: state.places[0]?.id, to: state.places[1]?.id,
     km: null, round: false, jobId: lastUsedJobId() || '', note: '', ...preset,
   };
@@ -1235,11 +1238,6 @@ function tripSheet(id, preset = {}) {
   });
   const el = form.elements;
 
-  const fillSelects = () => {
-    const from = el.from.value, to = el.to.value;
-    el.from.innerHTML = placeOptions(from);
-    el.to.innerHTML = placeOptions(to);
-  };
   const routeChanged = () => {
     const km = knownDistance(el.from.value, el.to.value);
     if (km != null) el.km.value = km;
@@ -1257,13 +1255,12 @@ function tripSheet(id, preset = {}) {
     select.dataset.prev = select.value;
     select.addEventListener('change', () => {
       if (select.value === '__new') {
-        const n = (prompt('Name or address of the new place') || '').trim();
-        if (!n) { select.value = select.dataset.prev; return; }
-        const place = { id: uid(), name: n, address: '' };
-        state.places.push(place);
-        save();
-        fillSelects();
-        select.value = place.id;
+        // Search for the new place, then come back to this trip with what was filled in so far.
+        select.value = select.dataset.prev;
+        const d = readForm(form);
+        const keep = { ...d, date: Number.isNaN(d.date) ? base.date : d.date, km: d.km > 0 ? d.km : null };
+        placeSheet(null, place => tripSheet(trip ? trip.id : null, { ...keep, ...(place ? { [name]: place.id } : {}) }));
+        return;
       }
       select.dataset.prev = select.value;
       routeChanged();
@@ -1294,27 +1291,115 @@ function tripSheet(id, preset = {}) {
   });
 }
 
-function placeSheet(id) {
+/**
+ * Address / place search, as you type. Uses Photon (photon.komoot.io), a free OpenStreetMap search
+ * that needs no API key. Results lean towards your other places, or the middle of Finland.
+ */
+async function searchPlaces(q, signal) {
+  const known = state.places.filter(p => typeof p.lat === 'number');
+  const avg = k => known.reduce((a, p) => a + p[k], 0) / known.length;
+  const lat = known.length ? avg('lat') : 64, lon = known.length ? avg('lon') : 26;
+  const url = `https://photon.komoot.io/api/?q=${encodeURIComponent(q)}&limit=10&lat=${lat.toFixed(3)}&lon=${lon.toFixed(3)}`;
+  const res = await fetch(url, { signal });
+  if (!res.ok) throw new Error(`search failed (${res.status})`);
+  const seen = new Set();
+  const out = [];
+  for (const f of (await res.json()).features || []) {
+    const p = f.properties || {};
+    const street = [p.street, p.housenumber].filter(Boolean).join(' ');
+    const area = p.city || p.district || p.county || p.state || '';
+    const title = p.name || street || area;
+    const country = /^(finland|suomi)$/i.test(p.country || '') ? '' : p.country || '';
+    const sub = [p.name ? street : '', [p.postcode, area].filter(Boolean).join(' '), country].filter(Boolean).join(', ');
+    const key = `${title}|${sub}`;
+    if (!title || seen.has(key)) continue;
+    seen.add(key);
+    const [lng, lt] = f.geometry.coordinates;
+    out.push({ title, sub, address: [p.name && street ? `${p.name}, ${street}` : street || p.name, area].filter(Boolean).join(', '), lat: lt, lon: lng });
+  }
+  return out.slice(0, 6);
+}
+
+/** Add or edit a place. With done(place|null), it's called after Save or Cancel (used by the trip sheet). */
+function placeSheet(id, done) {
   const place = id ? placeById(id) : null;
+  let picked = place && typeof place.lat === 'number' ? { lat: place.lat, lon: place.lon } : null;
+  let autoName = null;
+  let result = null;
+
   const body = `
     <div class="group">
-      <label class="row field left"><input name="name" placeholder="Name, e.g. Home" value="${esc(place ? place.name : '')}" autocomplete="off"></label>
-      <label class="row field left"><input name="address" placeholder="Address for Maps (optional)" value="${esc(place ? place.address || '' : '')}" autocomplete="off"></label>
+      <label class="row field left search-row">${icons.search}
+        <input name="search" type="search" placeholder="Search address or place" autocomplete="off" enterkeyhint="search"></label>
     </div>
-    <p class="hint">The address is only used for the "Check the distance in Maps" link. Add the town if Maps finds the wrong place.</p>
+    <div class="group mt" data-suggest hidden></div>
+    <p class="hint" data-search-hint>Type an address or a place, e.g. "Kauppakatu 1" or "Vuokatti bowling", and pick the right one.</p>
+    <div class="section-title"><span>Place</span></div>
+    <div class="group">
+      <label class="row field"><span>Name</span>
+        <input name="name" placeholder="e.g. Home" value="${esc(place ? place.name : '')}" autocomplete="off"></label>
+      <label class="row field"><span>Address</span>
+        <input name="address" placeholder="optional" value="${esc(place ? place.address || '' : '')}" autocomplete="off"></label>
+    </div>
+    <p class="hint" data-located>${picked ? '📍 Location found on the map.' : ''}</p>
     <p class="error" data-error hidden></p>
     ${place ? '<button type="button" class="btn plain danger-text mt" data-delete>Delete Place</button>' : ''}`;
 
   const form = openSheet(place ? 'Edit Place' : 'New Place', body, f => {
     const name = f.elements.name.value.trim();
-    if (!name) return showError(f, 'Give the place a name.'), false;
-    const data = { name, address: f.elements.address.value.trim() };
+    if (!name) return showError(f, 'Search for the place, or type a name for it.'), false;
+    const data = { name, address: f.elements.address.value.trim(), lat: picked ? picked.lat : undefined, lon: picked ? picked.lon : undefined };
     if (place) Object.assign(place, data);
-    else state.places.push({ id: uid(), ...data });
+    else state.places.push(result = { id: uid(), ...data });
+    if (place) result = place;
     save();
-    render();
+    if (!done) render();
   });
-  if (!place) setTimeout(() => form.elements.name.focus(), 50);
+  if (done) sheet.addEventListener('close', () => done(result), { once: true });
+  const el = form.elements;
+  if (!place) setTimeout(() => el.search.focus(), 50);
+
+  const list = $('[data-suggest]', form);
+  const hint = $('[data-search-hint]', form);
+  let timer = null, ctrl = null, results = [];
+  const show = html => { list.innerHTML = html; list.hidden = !html; hint.hidden = !!html; };
+
+  el.search.addEventListener('keydown', ev => { if (ev.key === 'Enter') ev.preventDefault(); });
+  el.search.addEventListener('input', () => {
+    clearTimeout(timer);
+    if (ctrl) ctrl.abort();
+    const q = el.search.value.trim();
+    if (q.length < 3) { show(''); return; }
+    timer = setTimeout(async () => {
+      ctrl = new AbortController();
+      show('<div class="row sub">Searching…</div>');
+      try {
+        results = await searchPlaces(q, ctrl.signal);
+        show(results.length
+          ? results.map((r, i) => `<button type="button" class="row" data-pick="${i}">
+              <span class="pin">📍</span>
+              <span class="grow"><span class="block clamp">${esc(r.title)}</span>
+                ${r.sub ? `<span class="sub block clamp">${esc(r.sub)}</span>` : ''}</span></button>`).join('')
+          : '<div class="row sub">No matches. Try adding the town, e.g. "Kauppakatu 1 Kajaani".</div>');
+      } catch (err) {
+        if (err.name !== 'AbortError') show('<div class="row sub">Search isn\'t available right now. You can type the name and address below.</div>');
+      }
+    }, 300);
+  });
+  list.addEventListener('click', ev => {
+    const btn = ev.target.closest('[data-pick]');
+    if (!btn) return;
+    const r = results[Number(btn.dataset.pick)];
+    // Keep a name the user typed (like "Home"); otherwise use the place's own name.
+    if (!el.name.value.trim() || el.name.value === autoName) el.name.value = autoName = r.title;
+    el.address.value = r.address;
+    picked = { lat: r.lat, lon: r.lon };
+    $('[data-located]', form).textContent = '📍 Location found on the map. You can rename it, e.g. "Home".';
+    el.search.value = '';
+    show('');
+  });
+  // A hand-typed address no longer matches the picked point.
+  el.address.addEventListener('input', () => { picked = null; $('[data-located]', form).textContent = ''; });
 
   const del = $('[data-delete]', form);
   if (del) del.addEventListener('click', () => {
