@@ -1,6 +1,6 @@
 // Offline support.
 // Bump CACHE on every release so installed apps download the new version.
-const CACHE = 'workhours-v6';
+const CACHE = 'workhours-v7';
 const ASSETS = [
   './',
   './index.html',

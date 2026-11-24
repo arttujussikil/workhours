@@ -45,26 +45,19 @@ function normalize(s) {
   if (!Array.isArray(premium.excluded)) premium.excluded = [];
   if (!premium.names || typeof premium.names !== 'object') premium.names = {};
   // Driving: places to pick as start/end points, and trips between them.
-  const places = Array.isArray(s.places) ? s.places : defaultPlaces();
+  const places = Array.isArray(s.places) ? s.places : [];
   const trips = Array.isArray(s.trips) ? s.trips : [];
   const kmRate = typeof set.kmRate === 'number' ? set.kmRate : 0;
   return {
     jobs: s.jobs, entries: s.entries, places, trips,
-    settings: { currency: set.currency || 'EUR', premium, kmRate, commuteSetup: !!set.commuteSetup },
+    settings: { currency: set.currency || 'EUR', premium, kmRate },
   };
-}
-function defaultPlaces() {
-  return [
-    { id: uid(), name: 'Home', address: '' },
-    { id: uid(), name: 'Vuokatti Bowling', address: 'Vuokatti Bowling, Sotkamo' },
-  ];
 }
 function isValidData(s) {
   return s && Array.isArray(s.jobs) && Array.isArray(s.entries) &&
     s.entries.every(e => typeof e.start === 'number');
 }
 function save() {
-  setupBowlingCommute();
   syncAutoTrips();
   try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); }
   catch (err) { alert('Could not save your data: ' + err.message); }
@@ -283,23 +276,6 @@ function syncAutoTrips() {
   return changed;
 }
 
-/** One-time setup: the bowling job's drive from Home (33.6 km each way, there and back). */
-function setupBowlingCommute() {
-  if (state.settings.commuteSetup) return false;
-  const job = state.jobs.find(j => /bowling|vuokatti/i.test(j.name));
-  if (!job) return false;
-  state.settings.commuteSetup = true;
-  if (job.commute) return true;
-  const place = (name, address) => {
-    let p = state.places.find(p => p.name.toLowerCase() === name.toLowerCase());
-    if (!p) state.places.push(p = { id: uid(), name, address });
-    return p;
-  };
-  const home = place('Home', '');
-  const work = place('Vuokatti Bowling', 'Vuokatti Bowling, Sotkamo');
-  job.commute = { from: home.id, to: work.id, km: 33.6, round: true, skip: [] };
-  return true;
-}
 
 function mapsUrl(from, to) {
   const q = p => encodeURIComponent((p && (p.address || p.name)) || '');
@@ -910,7 +886,10 @@ function renderDriving() {
       </button>`).join('') + '</div>';
   }
 
-  if (!state.trips.length) {
+  if (state.places.length < 2) {
+    html += `<p class="hint">First add the places you drive between under Places below, for example your home and your
+      workplace. Then log drives with +, or set a job to add its drive automatically (Jobs → job → Driving).</p>`;
+  } else if (!state.trips.length) {
     html += `<p class="hint">Tap a route above, or + at the top, to log a drive. Pick the start and end point, and the app
       remembers the distance for next time.</p>`;
   } else {
@@ -1137,7 +1116,8 @@ function jobSheet(id) {
       <label class="row field" data-commute><span class="grow">Round trip<span class="sub block">There and back, counts the distance twice</span></span>
         <input type="checkbox" class="switch" name="cRound" ${cDefault.round ? 'checked' : ''}></label>
     </div>
-    <p class="hint" data-commute>Add more places in the Driving tab.</p>
+    <p class="hint" data-commute>${state.places.length < 2
+      ? 'Add your start and end places in the Driving tab first.' : 'Add more places in the Driving tab.'}</p>
     <p class="error" data-error hidden></p>
     ${job ? '<button type="button" class="btn plain danger-text mt" data-delete>Delete Job</button>' : ''}`;
 
@@ -1153,7 +1133,6 @@ function jobSheet(id) {
       if (!(km > 0)) return showError(f, 'Enter the driving distance in kilometres.'), false;
       data.commute = { from: el.cFrom.value, to: el.cTo.value, km, round: el.cRound.checked, skip: (commute && commute.skip) || [] };
     }
-    state.settings.commuteSetup = true; // the user has chosen, don't apply the one-time setup over it
     if (job) Object.assign(job, data);
     else state.jobs.push({ id: uid(), createdAt: Date.now(), ...data });
     save();
@@ -1189,6 +1168,11 @@ function jobSheet(id) {
 /** Add or edit a drive. preset pre-fills a new trip (e.g. from a frequent route). */
 function tripSheet(id, preset = {}) {
   const trip = id ? state.trips.find(t => t.id === id) : null;
+  if (!trip && state.places.length < 2) {
+    alert('Add at least two places first (your start and end point).');
+    placeSheet(null);
+    return;
+  }
   const base = trip || {
     date: startOfDay(Date.now()), from: state.places[0]?.id, to: state.places[1]?.id,
     km: null, round: false, jobId: lastUsedJobId() || '', note: '', ...preset,
@@ -1504,7 +1488,7 @@ document.addEventListener('visibilitychange', () => {
 });
 
 setInterval(updateLive, 1000);
-if (setupBowlingCommute() | syncAutoTrips()) save();
+if (syncAutoTrips()) save();
 render();
 
 /* Ask the browser not to evict our data, and cache the app for offline use. */
