@@ -1384,7 +1384,8 @@ function placeSheet(id, done) {
         <input name="search" type="search" placeholder="Search address or place" autocomplete="off" enterkeyhint="search"></label>
     </div>
     <div class="group mt" data-suggest hidden></div>
-    <p class="hint" data-search-hint>Type an address or a place, e.g. "Kauppakatu 1" or "Vuokatti bowling", and pick the right one.</p>
+    <p class="hint" data-search-hint>Type an address or a place, e.g. "Kauppakatu 1" or "Vuokatti bowling", and pick the right one.
+      A business can be listed under another name, so if it's not found, search its street address.</p>
     <div class="section-title"><span>Place</span></div>
     <div class="group">
       <label class="row field"><span>Name</span>
@@ -1430,8 +1431,9 @@ function placeSheet(id, done) {
           ? results.map((r, i) => `<button type="button" class="row" data-pick="${i}">
               <span class="pin">📍</span>
               <span class="grow"><span class="block clamp">${esc(r.title)}</span>
-                ${r.sub ? `<span class="sub block clamp">${esc(r.sub)}</span>` : ''}</span></button>`).join('')
-          : '<div class="row sub">No matches. Try adding the town, e.g. "Kauppakatu 1 Kajaani".</div>');
+                ${r.sub ? `<span class="sub block clamp">${esc(r.sub)}</span>` : ''}</span></button>`).join('') +
+            '<div class="row sub">Not the right one? Try the street address.</div>'
+          : '<div class="row sub">No matches. Try the street address, or add the town, e.g. "Kauppakatu 1 Kajaani".</div>');
       } catch (err) {
         if (err.name !== 'AbortError') show('<div class="row sub">Search isn\'t available right now. You can type the name and address below.</div>');
       }
