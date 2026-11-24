@@ -220,6 +220,7 @@ a.row { text-decoration: none; }
 .search-row input { color: var(--text); }
 .search-row input::-webkit-search-cancel-button { display: none; }
 .pin { flex: none; font-size: 18px; }
+button.row[data-calc]:disabled { color: var(--muted); }
 
 .btn.stop { margin-top: 18px; background: rgba(255, 255, 255, 0.96); color: #d70015; }
 

@@ -284,6 +284,58 @@ function mapsUrl(from, to) {
   return `https://maps.apple.com/?saddr=${q(placeById(from))}&daddr=${q(placeById(to))}&dirflg=d`;
 }
 const parseNum = v => parseFloat(String(v).replace(',', '.'));
+const hasPoint = p => !!p && typeof p.lat === 'number' && typeof p.lon === 'number';
+
+/** Driving distance in km (one way) by road, from the free OSRM route planner (OpenStreetMap data). */
+async function drivingKm(fromId, toId) {
+  const a = placeById(fromId), b = placeById(toId);
+  const res = await fetch(`https://router.project-osrm.org/route/v1/driving/${a.lon},${a.lat};${b.lon},${b.lat}?overview=false`);
+  const data = await res.json();
+  if (data.code !== 'Ok' || !data.routes || !data.routes.length) throw new Error(data.message || 'no route');
+  return { km: Math.round(data.routes[0].distance / 100) / 10, min: Math.round(data.routes[0].duration / 60) };
+}
+
+/**
+ * The "Calculate distance" row in the trip and job sheets. Fills the km field when you tap it,
+ * and on its own when the route changes and the km field is empty.
+ */
+function distanceCalculator(form, fromEl, toEl, kmEl) {
+  const btn = $('[data-calc]', form);
+  const label = $('[data-calc-label]', form);
+  const note = $('[data-calc-note]', form);
+  let seq = 0;
+  const refresh = () => {
+    const ok = hasPoint(placeById(fromEl.value)) && hasPoint(placeById(toEl.value)) && fromEl.value !== toEl.value;
+    btn.disabled = !ok;
+    label.textContent = 'Calculate distance';
+    note.textContent = ok ? 'By road, from OpenStreetMap' : 'Search both places on the map first (Driving → Places)';
+    return ok;
+  };
+  const run = async () => {
+    if (!refresh()) return;
+    const mine = ++seq;
+    label.textContent = 'Calculating…';
+    try {
+      const r = await drivingKm(fromEl.value, toEl.value);
+      if (mine !== seq) return;
+      kmEl.value = r.km;
+      kmEl.dispatchEvent(new Event('input', { bubbles: true }));
+      label.textContent = 'Calculate distance';
+      note.textContent = `${fmtKm(r.km)} by road, about ${r.min} min`;
+    } catch {
+      if (mine !== seq) return;
+      label.textContent = 'Calculate distance';
+      note.textContent = "Couldn't calculate it right now. Type the km yourself.";
+    }
+  };
+  btn.addEventListener('click', run);
+  const changed = () => { if (refresh() && !(parseNum(kmEl.value) > 0)) run(); };
+  fromEl.addEventListener('change', changed);
+  toEl.addEventListener('change', changed);
+  changed();
+}
+const calcRow = (attr = '') => `<button type="button" class="row accent" data-calc ${attr}>
+  <span class="grow"><span class="block" data-calc-label>Calculate distance</span><span class="sub block" data-calc-note></span></span></button>`;
 
 /* ================= formatting ================= */
 
@@ -1116,6 +1168,7 @@ function jobSheet(id) {
       <label class="row field" data-commute><span>To</span><select name="cTo">${placeOpts(cDefault.to)}</select></label>
       <label class="row field" data-commute><span>Distance (km, one way)</span>
         <input name="cKm" inputmode="decimal" placeholder="km" value="${cDefault.km ?? ''}"></label>
+      ${calcRow('data-commute')}
       <label class="row field" data-commute><span class="grow">Round trip<span class="sub block">There and back, counts the distance twice</span></span>
         <input type="checkbox" class="switch" name="cRound" ${cDefault.round ? 'checked' : ''}></label>
     </div>
@@ -1146,12 +1199,10 @@ function jobSheet(id) {
   const showCommute = () => form.querySelectorAll('[data-commute]').forEach(r => { r.hidden = !form.elements.cOn.checked; });
   form.elements.cOn.addEventListener('change', showCommute);
   showCommute();
-  const fillKm = () => {
-    const km = knownDistance(form.elements.cFrom.value, form.elements.cTo.value);
-    if (km != null) form.elements.cKm.value = km;
-  };
+  const fillKm = () => { form.elements.cKm.value = knownDistance(form.elements.cFrom.value, form.elements.cTo.value) ?? ''; };
   form.elements.cFrom.addEventListener('change', fillKm);
   form.elements.cTo.addEventListener('change', fillKm);
+  distanceCalculator(form, form.elements.cFrom, form.elements.cTo, form.elements.cKm);
 
   const del = $('[data-delete]', form);
   if (del) del.addEventListener('click', () => {
@@ -1200,6 +1251,7 @@ function tripSheet(id, preset = {}) {
         <input name="km" inputmode="decimal" placeholder="km" value="${base.km ?? ''}"></label>
       <label class="row field"><span class="grow">Round trip<span class="sub block">There and back, counts the distance twice</span></span>
         <input type="checkbox" class="switch" name="round" ${base.round ? 'checked' : ''}></label>
+      ${calcRow()}
       <a class="row accent" data-maps target="_blank" rel="noopener">Check the distance in Maps</a>
     </div>
     <div class="group mt">
@@ -1238,10 +1290,8 @@ function tripSheet(id, preset = {}) {
   });
   const el = form.elements;
 
-  const routeChanged = () => {
-    const km = knownDistance(el.from.value, el.to.value);
-    if (km != null) el.km.value = km;
-  };
+  // A route you've driven before gets its saved distance; a new one is calculated (or typed).
+  const routeChanged = () => { el.km.value = knownDistance(el.from.value, el.to.value) ?? ''; };
   const update = () => {
     const d = readForm(form);
     $('[data-maps]', form).href = mapsUrl(d.from, d.to);
@@ -1275,6 +1325,7 @@ function tripSheet(id, preset = {}) {
   });
   form.addEventListener('input', update);
   update();
+  distanceCalculator(form, el.from, el.to, el.km);
 
   const del = $('[data-delete]', form);
   if (del) del.addEventListener('click', () => {
